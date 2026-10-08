@@ -1,3 +1,3 @@
 # Feature plans
 
-No active feature plans.
+- [Checkout agent sessions](001-agent-sessions.md) — Planned. Per-instance sessions, caller environment, immediate force-stop on removal/move, no exited-output retention, and no nested tmux agreed. Explicit absolute `--socket` paths required for serve/agent; path-based instance identity, mandatory same-user checks, and safe stale-socket recovery agreed. No default discovery or `--instance`. Path aliases resolve to a canonical identity; each daemon startup gets a fresh handshake ID. Protocol agreed: version 1 newline-delimited JSON, 1 MiB messages, 2-second connection/5-second handshake deadlines, one exchange per connection, and expected run IDs on future operations. Next: implement the local Unix control socket and read-only handshake, then stop for review.
