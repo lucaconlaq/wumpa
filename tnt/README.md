@@ -92,4 +92,4 @@ Activation may restart services or interrupt SSH. Roll back with:
 ssh tnt 'sudo nixos-rebuild switch --rollback'
 ```
 
-The server includes Zsh, Starship, Git, mise, tmux, Node.js 24, and CLI utilities.
+The server includes Wumpa, Zsh, Starship, Git, mise, tmux, Node.js 24, and CLI utilities.

@@ -1,5 +1,32 @@
 { lib, modulesPath, pkgs, ... }:
 
+let
+  # Keep this inline: update.sh transfers only server.nix to TNT.
+  wumpa = pkgs.stdenvNoCC.mkDerivation rec {
+    pname = "wumpa";
+    version = "0.1.0";
+
+    src = pkgs.fetchurl {
+      url = "https://github.com/lucaconlaq/wumpa/releases/download/v${version}/wumpa-x86_64-unknown-linux-musl.tar.gz";
+      hash = "sha256-Li/H+ozmBMZCtsyg+79ylBIGM4Xa8JiyQBd5N/VCxzo=";
+    };
+
+    dontUnpack = true;
+    dontConfigure = true;
+    dontBuild = true;
+    # Preserve the prebuilt musl binary without patching or stripping it.
+    dontFixup = true;
+
+    installPhase = ''
+      runHook preInstall
+      tar -xzf "$src" wumpa
+      install -Dm755 wumpa "$out/bin/wumpa"
+      runHook postInstall
+    '';
+
+    meta.platforms = [ "x86_64-linux" ];
+  };
+in
 {
   imports = [(modulesPath + "/virtualisation/google-compute-image.nix")];
 
@@ -37,8 +64,30 @@
     ripgrep
     tree
     unzip
+    wumpa
     zip
   ];
+
+  systemd.services.wumpa = {
+    description = "Wumpa server";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" ];
+    path = [ pkgs.git pkgs.openssh ];
+    environment = {
+      HOME = "/home/wumpa";
+      WUMPA_SERVER_CONFIG = "/home/wumpa/.config/wumpa/server.json";
+    };
+    serviceConfig = {
+      Type = "simple";
+      User = "wumpa";
+      WorkingDirectory = "/home/wumpa";
+      ExecStart = "${wumpa}/bin/wumpa serve --port 7432";
+      Restart = "on-failure";
+      RestartSec = "5s";
+      # SSH-forwarded agent sockets must remain accessible under /tmp.
+      PrivateTmp = false;
+    };
+  };
 
   # Support generic Linux binaries downloaded by development tools.
   programs.nix-ld.enable = true;
