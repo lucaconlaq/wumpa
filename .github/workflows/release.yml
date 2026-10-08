@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Prepare draft release
+        run: |
+          if gh release view "$TAG" --json isDraft > release.json; then
+            jq -e '.isDraft' release.json
+          else
+            gh release create "$TAG" --draft --verify-tag --generate-notes
+          fi
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
+      - name: Test
+        run: cargo +stable test --locked --target "${{ matrix.target }}"
+      - name: Build
+        run: cargo +stable build --locked --release --target "${{ matrix.target }}"
+      - name: Upload archive to draft
+        run: |
+          archive="wumpa-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" wumpa
+          gh release upload "$TAG" "$archive" --clobber
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish release
+        run: |
+          gh release download "$TAG" --pattern 'wumpa-*.tar.gz' --dir dist
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false

@@ -1,0 +1,9 @@
+name                = "tnt"
+project_name        = "TNT Wumpa"
+project_id          = "your-gcp-project-id"
+region              = "europe-west1"
+zone                = "europe-west1-b"
+machine_type        = "e2-standard-2"
+boot_disk_size_gb   = 50
+nixos_image_archive = "../nixos/wumpa.raw.tar.gz"
+ssh_public_key      = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"

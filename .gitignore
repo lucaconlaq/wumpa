@@ -1,0 +1,20 @@
+/target/
+/result
+/result-*
+
+
+# Local secret-source configuration.
+/psst.json
+
+# Terraform caches, local state, plans, and machine-specific overrides.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.raw.tar.gz.part
+.DS_Store
+tnt/terraform/state.tf
+tnt/terraform/terraform.tfvars
+tnt/nixos/wumpa.raw.tar.gz

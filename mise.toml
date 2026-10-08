@@ -1,0 +1,8 @@
+[tools]
+psst = "0.7.3"
+pi = "latest"
+rust = "latest"
+
+[tool_alias]
+psst = "npm:@lucaconlaq/psst"
+pi = "npm:@earendil-works/pi-coding-agent"

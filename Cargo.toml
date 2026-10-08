@@ -1,0 +1,18 @@
+[package]
+name = "wumpa"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Manage remote coding worktrees and sessions"
+
+[dependencies]
+clap = { features = ["derive"], version = "4" }
+crossterm = "0.28"
+ratatui = "0.29"
+serde = { features = ["derive"], version = "1" }
+serde_json = "1"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

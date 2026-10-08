@@ -1,0 +1,6 @@
+{
+  "GITHUB_TOKEN": {
+    "source": "shell",
+    "value": "gh auth token"
+  }
+}
