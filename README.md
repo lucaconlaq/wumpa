@@ -38,10 +38,15 @@ Both listeners retry transient resource pressure for up to ten seconds with
 backoff. Persistent or fatal listener failures stop the daemon with an error rather
 than silently leaving local control unavailable.
 
-The local control protocol currently provides only an internal read-only version-1
-handshake: newline-delimited JSON, at most 1 MiB including the newline, one exchange
-per connection, with a 2-second connection and 5-second total exchange deadline.
-It returns the canonical socket path and a fresh daemon-run ID. TCP/SSH repository
-access is unchanged; `wumpa agent`, checkout preflight, and tmux sessions are not yet
-implemented. This same-user design does not prove identical filesystem namespaces
-or prevent deliberate Unix socket forwarding.
+The local control protocol provides an internal read-only version-1 handshake
+and checkout preflight: newline-delimited JSON, at most 1 MiB including the newline,
+one exchange per connection, with a 2-second connection and 5-second total exchange
+deadline. The handshake returns the canonical socket path and a fresh daemon-run
+ID; preflight requires that run ID and validates against the daemon's live
+registration snapshot without modifying configuration. Main/linked checkouts,
+subdirectories, and aliases are supported. Required canonical paths and device/inode
+observations of the caller directory, checkout root, Git directory, and shared Git
+directory must agree. Unavailable checks fail preflight but never establish removal.
+These observations are not durable identities or proof of identical filesystem
+namespaces; deliberate Unix socket forwarding remains possible. TCP/SSH repository
+access is unchanged; `wumpa agent` and tmux sessions are not yet implemented.

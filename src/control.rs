@@ -1,8 +1,12 @@
-//! Local-only, read-only control handshake. This transport never loads configuration.
+//! Local-only read-only control operations; configuration is supplied in memory.
 
 use std::path::Path;
 
 use crate::Result;
+#[cfg(not(unix))]
+use crate::config::ServerConfig;
+#[cfg(not(unix))]
+use std::sync::{Arc, Mutex};
 
 /// Require explicit absolute instance selection on every platform.
 pub fn validate_path(path: &Path) -> Result<()> {
@@ -21,6 +25,10 @@ pub struct Listener;
 #[cfg(not(unix))]
 impl Listener {
     pub fn bind(_path: &Path) -> Result<Self> {
+        Err("Unix control sockets require Linux or macOS".into())
+    }
+
+    pub fn bind_with_config(_path: &Path, _config: Arc<Mutex<ServerConfig>>) -> Result<Self> {
         Err("Unix control sockets require Linux or macOS".into())
     }
 
@@ -55,7 +63,7 @@ mod unix {
         },
         path::{Path, PathBuf},
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread::{self, JoinHandle},
@@ -74,7 +82,15 @@ mod unix {
     #[derive(Serialize, Deserialize)]
     #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
     enum Request {
-        Handshake { version: u32 },
+        Handshake {
+            version: u32,
+        },
+        Preflight {
+            version: u32,
+            run_id: String,
+            directory: PathBuf,
+            observations: Box<crate::checkout::Checkout>,
+        },
     }
 
     /// Identity of one daemon run at a stable canonical instance path.
@@ -84,6 +100,45 @@ mod unix {
         pub version: u32,
         pub socket: PathBuf,
         pub run_id: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Preflight {
+        pub checkout: Option<crate::checkout::Checkout>,
+        pub error: Option<String>,
+    }
+
+    /// Internal preflight helper; run mismatches require a fresh handshake.
+    #[allow(dead_code)]
+    pub fn preflight(handshake: &Handshake, directory: &Path) -> Result<crate::checkout::Checkout> {
+        let observations = crate::checkout::observe(directory, Instant::now() + EXCHANGE_TIMEOUT)?;
+        let path = canonical_path(&handshake.socket)?;
+        let before = socket_metadata(&path)?;
+        let mut stream = connect(&path, CONNECT_TIMEOUT)?;
+        peer(&stream)?;
+        if !same_identity(&before, &socket_metadata(&path)?) {
+            return Err("control endpoint changed during connection".into());
+        }
+        let mut exchange = Exchange {
+            stream: &mut stream,
+            deadline: Instant::now() + EXCHANGE_TIMEOUT,
+        };
+        protocol::write_message(
+            &Request::Preflight {
+                version: VERSION,
+                run_id: handshake.run_id.clone(),
+                directory: directory.to_path_buf(),
+                observations: Box::new(observations.clone()),
+            },
+            &mut exchange,
+        )?;
+        let response: Preflight = protocol::read_message(&mut exchange)?;
+        match (response.checkout, response.error) {
+            (Some(checkout), None) if checkout == observations => Ok(checkout),
+            (None, Some(error)) => Err(error.into()),
+            _ => Err("invalid checkout preflight response".into()),
+        }
     }
 
     fn user() -> u32 {
@@ -564,6 +619,57 @@ mod unix {
         Ok(response)
     }
 
+    /// Handle one bounded control exchange independently of listener supervision.
+    fn handle_connection(
+        stream: &mut UnixStream,
+        handshake: &Handshake,
+        config: &Mutex<crate::config::ServerConfig>,
+        deadline: Instant,
+    ) -> Result<()> {
+        stream.set_nonblocking(false)?;
+        peer(stream)?;
+        let mut exchange = Exchange { stream, deadline };
+        match protocol::read_message(&mut exchange)? {
+            Request::Handshake { version } => {
+                if version != VERSION {
+                    return Err("incompatible control version".into());
+                }
+                protocol::write_message(handshake, &mut exchange)
+            }
+            Request::Preflight {
+                version,
+                run_id,
+                directory,
+                observations,
+            } => {
+                let result = (|| -> Result<crate::checkout::Checkout> {
+                    if version != VERSION || run_id != handshake.run_id {
+                        return Err(
+                            "control version or daemon run changed; repeat handshake".into()
+                        );
+                    }
+                    let repositories = config
+                        .lock()
+                        .map_err(|_| "configuration lock poisoned")?
+                        .repositories
+                        .clone();
+                    crate::checkout::validate(&directory, &observations, &repositories, deadline)
+                })();
+                let response = match result {
+                    Ok(checkout) => Preflight {
+                        checkout: Some(checkout),
+                        error: None,
+                    },
+                    Err(error) => Preflight {
+                        checkout: None,
+                        error: Some(error.to_string()),
+                    },
+                };
+                protocol::write_message(&response, &mut exchange)
+            }
+        }
+    }
+
     /// Own the endpoint lock, listener worker, and identity-checked cleanup.
     pub struct Listener {
         path: PathBuf,
@@ -576,7 +682,19 @@ mod unix {
 
     impl Listener {
         /// Bind an explicitly selected private endpoint, recovering only verified stale sockets.
+        #[allow(dead_code)]
         pub fn bind(path: &Path) -> Result<Self> {
+            Self::bind_with_config(
+                path,
+                Arc::new(Mutex::new(crate::config::ServerConfig::default())),
+            )
+        }
+
+        /// Use the daemon's live configuration, snapshotting before Git discovery.
+        pub fn bind_with_config(
+            path: &Path,
+            config: Arc<Mutex<crate::config::ServerConfig>>,
+        ) -> Result<Self> {
             let path = canonical_path(path)?;
             let directory = OpenOptions::new()
                 .read(true)
@@ -642,29 +760,16 @@ mod unix {
                                     active.fetch_add(1, Ordering::Relaxed);
                                     let count = active.clone();
                                     let response = response.clone();
+                                    let config = config.clone();
                                     let result = thread::Builder::new()
                                         .name("control-handshake".into())
                                         .spawn(move || {
                                             let deadline = Instant::now() + EXCHANGE_TIMEOUT;
-                                            let _ = (|| -> Result<()> {
-                                                stream.set_nonblocking(false)?;
-                                                peer(&stream)?;
-                                                let mut exchange = Exchange {
-                                                    stream: &mut stream,
-                                                    deadline,
-                                                };
-                                                let Request::Handshake { version } =
-                                                    protocol::read_message(&mut exchange)?;
-                                                if version != VERSION {
-                                                    return Err(
-                                                        "incompatible control version".into()
-                                                    );
-                                                }
-                                                protocol::write_message(
-                                                    response.as_ref(),
-                                                    &mut exchange,
-                                                )
-                                            })(
+                                            let _ = handle_connection(
+                                                &mut stream,
+                                                &response,
+                                                &config,
+                                                deadline,
                                             );
                                             count.fetch_sub(1, Ordering::Relaxed);
                                         });
@@ -775,6 +880,64 @@ mod unix {
             assert_ne!(first.run_id, next.run_id);
             drop(restarted);
             drop(other);
+        }
+
+        #[test]
+        fn preflight_uses_live_registration_and_binds_to_the_daemon_run() {
+            let dir = directory();
+            let repo = dir.path().join("repo");
+            fs::create_dir(&repo).unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .arg("init")
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let config = Arc::new(Mutex::new(crate::config::ServerConfig::default()));
+            let path = dir.path().join("control");
+            let listener = Listener::bind_with_config(&path, config.clone()).unwrap();
+            let first = handshake(&path).unwrap();
+            assert!(preflight(&first, &repo).is_err());
+            config
+                .lock()
+                .unwrap()
+                .repositories
+                .push(crate::config::Repository {
+                    url: "test".into(),
+                    checkout_path: Some(repo.clone()),
+                });
+            let before = serde_json::to_vec(&*config.lock().unwrap()).unwrap();
+            let checkout = preflight(&first, &repo).unwrap();
+            let mut mismatch = checkout.clone();
+            mismatch.root.inode ^= 1;
+            let request = serde_json::to_vec(&Request::Preflight {
+                version: VERSION,
+                run_id: first.run_id.clone(),
+                directory: repo.clone(),
+                observations: Box::new(mismatch),
+            })
+            .unwrap();
+            let mut request = request;
+            request.push(b'\n');
+            let rejected: Preflight = serde_json::from_slice(&exchange(&path, &request)).unwrap();
+            assert!(rejected.checkout.is_none() && rejected.error.is_some());
+            assert_eq!(
+                serde_json::to_vec(&*config.lock().unwrap()).unwrap(),
+                before
+            );
+            drop(listener);
+            let _restarted = Listener::bind_with_config(&path, config).unwrap();
+            assert!(
+                preflight(&first, &repo)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("repeat handshake")
+            );
+            assert!(preflight(&handshake(&path).unwrap(), &repo).is_ok());
         }
 
         #[test]

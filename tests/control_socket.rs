@@ -104,10 +104,31 @@ fn daemon_recovers_from_descriptor_pressure_without_losing_either_listener() {
 }
 
 #[test]
-fn handshake_is_read_only_tcp_rejects_it_and_sigterm_cleans_up() {
+fn control_is_read_only_tcp_rejects_it_and_sigterm_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.path().join("config.json");
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "repository_dir": dir.path(),
+            "repositories": [{"url": "git@github.com:test/repo.git", "checkout_path": repo}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let socket = dir.path().join("control.sock");
     let ready = dir.path().join("ready.json");
     let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -120,6 +141,8 @@ fn handshake_is_read_only_tcp_rejects_it_and_sigterm_cleans_up() {
             .arg("--ready-file")
             .arg(&ready)
             .env("WUMPA_SERVER_CONFIG", &config)
+            .env("GIT_DIR", "/missing-inherited-override")
+            .env("GIT_WORK_TREE", "/missing-inherited-worktree")
             .env("HOME", dir.path())
             .stdout(Stdio::null())
             .spawn()
@@ -159,6 +182,41 @@ fn handshake_is_read_only_tcp_rejects_it_and_sigterm_cleans_up() {
     BufReader::new(tcp).read_line(&mut line).unwrap();
     let rejected: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert!(rejected["error"].is_string());
+    assert_eq!(fs::read(&config).unwrap(), before);
+
+    let observation = |path: &std::path::Path| {
+        use std::os::unix::fs::MetadataExt;
+        let path = path.canonicalize().unwrap();
+        let metadata = path.metadata().unwrap();
+        serde_json::json!({"path": path, "device": metadata.dev(), "inode": metadata.ino()})
+    };
+    let request = serde_json::json!({
+        "action": "preflight", "version": 1, "run_id": response["run_id"],
+        "directory": repo,
+        "observations": {
+            "directory": observation(&repo), "root": observation(&repo),
+            "git_directory": observation(&repo.join(".git")),
+            "common_directory": observation(&repo.join(".git"))
+        }
+    });
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    let mut local = UnixStream::connect(&socket).unwrap();
+    local
+        .set_read_timeout(Some(Duration::from_secs(6)))
+        .unwrap();
+    local.write_all(&bytes).unwrap();
+    line.clear();
+    BufReader::new(local).read_line(&mut line).unwrap();
+    let accepted: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(accepted["error"].is_null(), "{accepted}");
+    assert_eq!(accepted["checkout"], request["observations"]);
+    let mut tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+    tcp.write_all(&bytes).unwrap();
+    line.clear();
+    BufReader::new(tcp).read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&line).unwrap()["error"].is_string());
     assert_eq!(fs::read(&config).unwrap(), before);
 
     // SAFETY: this PID belongs to the still-live child owned by this test.

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::process::{Command, ExitCode};
 
 mod agent;
+mod checkout;
 mod client;
 mod clone;
 mod config;

@@ -68,7 +68,16 @@ pub fn discover(repositories: &[Repository]) -> Vec<RepositoryWorktrees> {
         .collect()
 }
 
-fn list(path: &Path, deadline: Instant) -> Result<Vec<Worktree>> {
+pub(crate) fn list(path: &Path, deadline: Instant) -> Result<Vec<Worktree>> {
+    parse(&git_output(
+        path,
+        &["worktree", "list", "--porcelain", "-z"],
+        deadline,
+    )?)
+}
+
+/// Run isolated read-only Git with a shared deadline and per-command output limit.
+pub(crate) fn git_output(path: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>> {
     if Instant::now() >= deadline {
         return Err("Worktree discovery timed out; refresh to retry".into());
     }
@@ -85,7 +94,7 @@ fn list(path: &Path, deadline: Instant) -> Result<Vec<Worktree>> {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(path)
-        .args(["worktree", "list", "--porcelain", "-z"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(Stdio::null());
@@ -122,7 +131,7 @@ fn list(path: &Path, deadline: Instant) -> Result<Vec<Worktree>> {
     if bytes.len() as u64 > MAX_OUTPUT {
         return Err("Worktree list exceeds the discovery size limit".into());
     }
-    parse(&bytes)
+    Ok(bytes)
 }
 
 fn parse(bytes: &[u8]) -> Result<Vec<Worktree>> {

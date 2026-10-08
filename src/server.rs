@@ -83,7 +83,8 @@ fn apply(request: Request, path: &Path, config: &mut ServerConfig) -> Result<Opt
 /// Serve bounded loopback requests with a five-second message-read deadline.
 /// Persist configuration before optionally publishing detached startup readiness.
 pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> {
-    let mut control = crate::control::Listener::bind(socket)?;
+    let shared_config = Arc::new(Mutex::new(ServerConfig::default()));
+    let mut control = crate::control::Listener::bind_with_config(socket, shared_config.clone())?;
     crate::control::install_shutdown_handlers()?;
     let path = config::path("server")?;
     let mut config: ServerConfig = config::load(&path)?;
@@ -98,11 +99,6 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
     let mut log_name = path.as_os_str().to_os_string();
     log_name.push(".log");
     let log_path = std::path::PathBuf::from(log_name);
-    crate::daemon::banner(&ready, &path, ready_file.map(|_| log_path.as_path()));
-    std::io::stdout().flush()?;
-    if let Some(ready_file) = ready_file {
-        config::save(ready_file, &ready)?;
-    }
 
     for entry in std::fs::read_dir(config.repository_dir.as_ref().unwrap())? {
         let entry = entry?;
@@ -117,7 +113,15 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
             ));
         }
     }
-    let config = Arc::new(Mutex::new(config));
+    *shared_config
+        .lock()
+        .map_err(|_| "configuration lock poisoned")? = config;
+    let config = shared_config;
+    crate::daemon::banner(&ready, &path, ready_file.map(|_| log_path.as_path()));
+    std::io::stdout().flush()?;
+    if let Some(ready_file) = ready_file {
+        config::save(ready_file, &ready)?;
+    }
     let cloning = Arc::new(Mutex::new(()));
     let active = Arc::new(AtomicUsize::new(0));
     listener.set_nonblocking(true)?;

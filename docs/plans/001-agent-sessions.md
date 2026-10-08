@@ -1,11 +1,23 @@
 # Checkout agent sessions
 
 ## Status
-Unix control socket/handshake slice implemented; awaiting review.
+Read-only checkout preflight implemented; awaiting review.
 
-- `src/control.rs` now provides the isolated Unix listener and internal handshake
-  client. `serve --socket` is required in foreground and detached mode. No checkout
-  preflight, public agent command, configuration settings, or tmux work is included.
+- Preflight uses the daemon's live in-memory registration snapshot, bounded isolated
+  Git discovery, and mandatory matching canonical paths/device/inode observations
+  for the caller directory, root, Git directory, and shared Git directory.
+- Unavailable observations fail closed; access/discovery errors remain unknown,
+  never confirmed removal. Observations are not durable lifecycle identities.
+- No public agent command, launch settings, session lifecycle, or tmux changes.
+  Stop for review before the session-contract slice.
+- Current Linux validation: formatting, strict Clippy, and all 110 tests pass.
+  Nix development shell unavailable (no flake); used installed Rust 1.99 and
+  Nix-provided GCC/Git. Rust 1.85 and macOS runtime checks remain unavailable.
+
+- The previous slice added the isolated Unix listener and internal handshake
+  client in `src/control.rs`. `serve --socket` is required in foreground and detached
+  mode. That slice excluded checkout preflight, public agent commands, configuration
+  settings, and tmux.
 - Review fixes: directory-FD-anchored quarantine/identity validation protects
   concurrent endpoint replacements; exclusive restoration never clobbers newer
   entries. Unexpected entries are preserved with diagnostics if restoration fails.
@@ -20,7 +32,7 @@ Unix control socket/handshake slice implemented; awaiting review.
   installed Rust/Cargo 1.99 with Nix-provided GCC and Git. macOS runtime and
   Rust 1.85 validation remain outstanding; no dependencies or toolchain pins changed.
 - The direct-config resolver implementation was reverted. Prior test results
-  applied only to that prototype; later architecture slices remain unimplemented.
+  applied only to that prototype; session architecture slices remain unimplemented.
 - Work in small, independently tested slices, stopping for review after each.
   Start with the local Unix control socket and handshake, then checkout preflight;
   defer public agent commands and session launch until their prerequisites are ready.
@@ -124,10 +136,11 @@ attach to them in this scope.
 ## Open decisions
 Resolve each before its dependent slice; do not silently choose during implementation.
 
-- Before preflight: filesystem comparison fields and unavailable-check policy;
-  identity checks that distinguish confirmed removal/replacement/moves from access
-  failures. Canonical paths and Git common-directory paths alone are not durable
-  identities.
+- Before lifecycle: durable identity checks that distinguish confirmed
+  removal/replacement/moves from access failures. Preflight comparison fields and
+  unavailable-check policy are agreed: canonical paths plus device/inode for caller
+  directory, root, Git directory, and common directory; all observations mandatory.
+  These observations alone are not durable identities.
 - Before launch: stable per-instance tmux socket/ownership rules derived from the
   control socket path; retry recovery and service restart lifecycle.
 - Before launch: environment encoding/size limits, exact bookkeeping-variable filter,
@@ -140,9 +153,10 @@ Resolve each before its dependent slice; do not silently choose during implement
   any Wumpa deletion path must honor stop-before-remove when provided.
 
 ## Current review slice
-Implemented only the Unix control socket and read-only versioned handshake. Stop
-for review before proceeding. The following were this slice's acceptance criteria;
-filesystem identity decisions below remain prerequisites for checkout preflight.
+Read-only checkout preflight, implementation step 2. Review the mandatory observation
+policy, registration/membership validation, run-ID binding, and isolated Git queries.
+Stop for review before proceeding. The following criteria describe the previous
+Unix control socket/handshake slice, retained for reference.
 
 - Follow the agreed Unix socket policy, protocol limits, and daemon-run ID binding.
   Implement race-safe lock, socket identity-check, and cleanup mechanics.
