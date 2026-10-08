@@ -19,13 +19,16 @@ impl Drop for Detached {
 
 #[test]
 fn detached_server_survives_launcher_and_uses_a_new_session() {
+    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = directory.path().join("server.json");
     let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let output = Command::new(env!("CARGO_BIN_EXE_wumpa"))
-        .args(["serve", "-d", "--port", &port.to_string()])
+        .args(["serve", "-d", "--port", &port.to_string(), "--socket"])
+        .arg(directory.path().join("control.sock"))
         .env("WUMPA_SERVER_CONFIG", &config)
         .env("HOME", directory.path())
         .env("NO_COLOR", "1")
@@ -79,11 +82,14 @@ fn detached_server_survives_launcher_and_uses_a_new_session() {
 
 #[test]
 fn occupied_port_is_reported_as_startup_failure() {
+    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let output = Command::new(env!("CARGO_BIN_EXE_wumpa"))
-        .args(["serve", "--detach", "--port", &port.to_string()])
+        .args(["serve", "--detach", "--port", &port.to_string(), "--socket"])
+        .arg(directory.path().join("control.sock"))
         .env("WUMPA_SERVER_CONFIG", directory.path().join("server.json"))
         .env("HOME", directory.path())
         .output()

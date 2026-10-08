@@ -162,6 +162,7 @@ fn helper_uses_each_sessions_agent_and_drops_daemon_connection_on_disconnect() {
 #[test]
 fn ssh_preflight_uses_fixed_helper_command_and_does_not_save_metadata() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let bin = dir.path().join("bin");
     let home = dir.path().join("remote home");
     std::fs::create_dir_all(&bin).unwrap();
@@ -179,7 +180,9 @@ fn ssh_preflight_uses_fixed_helper_command_and_does_not_save_metadata() {
     let config = dir.path().join("server.json");
     let mut daemon = Process(
         Command::new(env!("CARGO_BIN_EXE_wumpa"))
-            .args(["serve", "--port", &port.to_string(), "--ready-file"])
+            .args(["serve", "--socket"])
+            .arg(dir.path().join("control.sock"))
+            .args(["--port", &port.to_string(), "--ready-file"])
             .arg(&ready)
             .env("WUMPA_SERVER_CONFIG", &config)
             .env("HOME", &home)

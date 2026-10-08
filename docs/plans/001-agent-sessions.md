@@ -1,10 +1,26 @@
 # Checkout agent sessions
 
 ## Status
-Planned.
+Unix control socket/handshake slice implemented; awaiting review.
 
-- The direct-config resolver implementation was reverted. The architecture below
-  is not implemented or validated; prior test results applied only to that prototype.
+- `src/control.rs` now provides the isolated Unix listener and internal handshake
+  client. `serve --socket` is required in foreground and detached mode. No checkout
+  preflight, public agent command, configuration settings, or tmux work is included.
+- Review fixes: directory-FD-anchored quarantine/identity validation protects
+  concurrent endpoint replacements; exclusive restoration never clobbers newer
+  entries. Unexpected entries are preserved with diagnostics if restoration fails.
+  Accepted Unix streams are restored to blocking mode. Both listeners use bounded
+  resource-pressure retries, and fatal control-worker failures reach daemon supervision.
+  Non-UTF-8 canonical socket paths are rejected before creating runtime files.
+- Linux validation: `cargo fmt --check`, `cargo clippy --all-targets`, and all 108
+  tests pass, including socket lifecycle, bounded framing/deadlines, aliases,
+  independent instances, restart identity, TCP rejection, and config immutability.
+  Ownership mismatch is unit-tested; live peers are verified with OS credentials.
+- This checkout has no Nix flake, so `nix develop` was unavailable. Validation used
+  installed Rust/Cargo 1.99 with Nix-provided GCC and Git. macOS runtime and
+  Rust 1.85 validation remain outstanding; no dependencies or toolchain pins changed.
+- The direct-config resolver implementation was reverted. Prior test results
+  applied only to that prototype; later architecture slices remain unimplemented.
 - Work in small, independently tested slices, stopping for review after each.
   Start with the local Unix control socket and handshake, then checkout preflight;
   defer public agent commands and session launch until their prerequisites are ready.
@@ -123,8 +139,10 @@ Resolve each before its dependent slice; do not silently choose during implement
   Checkout deletion commands are not introduced merely to implement this feature;
   any Wumpa deletion path must honor stop-before-remove when provided.
 
-## Next small step
-Implement only the Unix control socket and read-only versioned handshake.
+## Current review slice
+Implemented only the Unix control socket and read-only versioned handshake. Stop
+for review before proceeding. The following were this slice's acceptance criteria;
+filesystem identity decisions below remain prerequisites for checkout preflight.
 
 - Follow the agreed Unix socket policy, protocol limits, and daemon-run ID binding.
   Implement race-safe lock, socket identity-check, and cleanup mechanics.

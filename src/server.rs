@@ -82,7 +82,9 @@ fn apply(request: Request, path: &Path, config: &mut ServerConfig) -> Result<Opt
 
 /// Serve bounded loopback requests with a five-second message-read deadline.
 /// Persist configuration before optionally publishing detached startup readiness.
-pub fn serve(port: u16, ready_file: Option<&Path>) -> Result<()> {
+pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> {
+    let mut control = crate::control::Listener::bind(socket)?;
+    crate::control::install_shutdown_handlers()?;
     let path = config::path("server")?;
     let mut config: ServerConfig = config::load(&path)?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
@@ -118,8 +120,34 @@ pub fn serve(port: u16, ready_file: Option<&Path>) -> Result<()> {
     let config = Arc::new(Mutex::new(config));
     let cloning = Arc::new(Mutex::new(()));
     let active = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        let stream = stream?;
+    listener.set_nonblocking(true)?;
+    #[cfg(unix)]
+    let mut failing_since = None;
+    while !crate::control::shutting_down() {
+        control.check()?;
+        let stream = match listener.accept() {
+            Ok((stream, _)) => {
+                #[cfg(unix)]
+                {
+                    failing_since = None;
+                }
+                stream.set_nonblocking(false)?;
+                stream
+            }
+            Err(error) => {
+                #[cfg(unix)]
+                {
+                    std::thread::sleep(crate::control::accept_backoff(
+                        error,
+                        &mut failing_since,
+                        Duration::from_secs(10),
+                    )?);
+                    continue;
+                }
+                #[cfg(not(unix))]
+                return Err(error.into());
+            }
+        };
         if active.load(Ordering::Relaxed) >= 32 {
             drop(stream);
             continue;

@@ -16,9 +16,19 @@ impl Drop for Daemon {
 }
 
 fn start(path: &Path, port: u16) -> Daemon {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
     let mut daemon = Daemon(
         Command::new(env!("CARGO_BIN_EXE_wumpa"))
-            .args(["serve", "--port", &port.to_string()])
+            .args(["serve", "--port", &port.to_string(), "--socket"])
+            .arg(path.parent().unwrap().join("control.sock"))
             .env("WUMPA_SERVER_CONFIG", path)
             .env("HOME", path.parent().unwrap())
             .stdout(Stdio::null())
@@ -79,6 +89,11 @@ fn client(path: &Path, input: &str) -> String {
 #[test]
 fn invalid_server_root_does_not_rewrite_legacy_config() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let path = dir.path().join("server.json");
     for config in [
         r#"{"repositories":["https://example.com/app.git"]}"#,
@@ -92,7 +107,8 @@ fn invalid_server_root_does_not_rewrite_legacy_config() {
                 let port = reservation.local_addr().unwrap().port();
                 drop(reservation);
                 let output = Command::new(env!("CARGO_BIN_EXE_wumpa"))
-                    .args(["serve", "--port", &port.to_string()])
+                    .args(["serve", "--port", &port.to_string(), "--socket"])
+                    .arg(dir.path().join("control.sock"))
                     .env("WUMPA_SERVER_CONFIG", &path)
                     .env_remove("HOME")
                     .output()
@@ -136,7 +152,8 @@ fn legacy_server_migration_survives_restart_without_cloning() {
     drop(daemon);
     let _daemon = start(&path, port);
     assert_eq!(std::fs::read(&path).unwrap(), migrated);
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    // Config plus the control socket and persistent startup lock; no clone.
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
 }
 
 #[test]
@@ -241,7 +258,7 @@ fn local_client_saves_connection_and_repository_across_restarts() {
     let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
     assert_eq!(
         entries.len(),
-        2,
-        "only the two config files should exist; no clone"
+        4,
+        "only two configs, the control socket, and its lock should exist; no clone"
     );
 }

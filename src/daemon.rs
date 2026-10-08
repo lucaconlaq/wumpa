@@ -48,7 +48,7 @@ pub fn banner(ready: &Ready, config: &Path, log: Option<&Path>) {
 /// Start a new session and wait up to ten seconds for listener readiness.
 /// On startup failure, terminate and reap the child before returning an error.
 #[cfg(unix)]
-pub fn detach(port: u16) -> Result<()> {
+pub fn detach(port: u16, socket: &Path) -> Result<()> {
     use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
 
     let path = config::path("server")?;
@@ -71,7 +71,9 @@ pub fn detach(port: u16) -> Result<()> {
     let ready_path = directory.path().join("ready.json");
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["serve", "--port", &port.to_string(), "--ready-file"])
+        .args(["serve", "--socket"])
+        .arg(socket)
+        .args(["--port", &port.to_string(), "--ready-file"])
         .arg(&ready_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
@@ -126,6 +128,6 @@ pub fn detach(port: u16) -> Result<()> {
 
 /// Report that detached startup is unsupported on this platform.
 #[cfg(not(unix))]
-pub fn detach(_port: u16) -> Result<()> {
+pub fn detach(_port: u16, _socket: &Path) -> Result<()> {
     Err("detached mode is currently supported on macOS and Linux only".into())
 }

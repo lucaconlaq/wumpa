@@ -5,6 +5,7 @@ mod agent;
 mod client;
 mod clone;
 mod config;
+mod control;
 mod daemon;
 mod helper;
 mod output;
@@ -31,6 +32,9 @@ struct Cli {
 enum Commands {
     /// Run the local-only server (use SSH forwarding for remote access)
     Serve {
+        /// Absolute control socket in an existing private (0700) directory
+        #[arg(long)]
+        socket: std::path::PathBuf,
         #[arg(long, default_value_t = 7432, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
         /// Detach into the background, logging beside the server config
@@ -101,14 +105,16 @@ fn run() -> Result<()> {
         None if cli.plain => client::run(),
         None => tui::run(),
         Some(Commands::Serve {
+            socket,
             port,
             detach,
             ready_file,
         }) => {
+            control::validate_path(&socket)?;
             if detach {
-                daemon::detach(port)
+                daemon::detach(port, &socket)
             } else {
-                server::serve(port, ready_file.as_deref())
+                server::serve(port, &socket, ready_file.as_deref())
             }
         }
         Some(Commands::CloneHelper) => helper::run(),

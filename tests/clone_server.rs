@@ -104,6 +104,7 @@ exec /bin/sh -c "$last"
     }
 
     fn start(root: &Path, port: u16) -> Process {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         let ready = root.join("ready");
         let _ = fs::remove_file(&ready);
         let working_dir = root.join("server-cwd");
@@ -111,7 +112,9 @@ exec /bin/sh -c "$last"
         let mut child = Process(
             Command::new(env!("CARGO_BIN_EXE_wumpa"))
                 .current_dir(&working_dir)
-                .args(["serve", "--port", &port.to_string(), "--ready-file"])
+                .args(["serve", "--socket"])
+                .arg(root.join("control.sock"))
+                .args(["--port", &port.to_string(), "--ready-file"])
                 .arg(&ready)
                 .env("WUMPA_SERVER_CONFIG", root.join("server.json"))
                 .env("SSH_AUTH_SOCK", root.join("agent"))
