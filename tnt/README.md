@@ -1,6 +1,6 @@
 # TNT server
 
-Run commands from the repository root.
+The TNT server runs the Wumpa server. It is based on NixOS.
 
 ## Setup
 
@@ -93,16 +93,3 @@ ssh tnt 'sudo nixos-rebuild switch --rollback'
 ```
 
 The server includes Zsh, Starship, Git, mise, tmux, Node.js 24, and CLI utilities.
-Node.js provides the runtime for npm-based tools such as Pi and psst. Pi is installed
-separately through mise; project toolchains belong in each repository. Use a Nerd
-Font for prompt icons. Starship configuration is embedded in `server.nix`, not synced.
-
-Mise is activated automatically in interactive Zsh shells, including tmux panes;
-no manual `mise activate` is needed. After updating, open a new shell (or run
-`exec zsh`) to load the shell configuration.
-
-Tmux's status bar is hidden. Inside tmux, the prompt shows
-`wumpa [ session-name]`, using the current pane's session name; outside tmux,
-the session indicator is omitted. Tmux is not started automatically. For an
-already-running tmux server, reload its configuration with
-`tmux source-file /etc/tmux.conf` after updating.
