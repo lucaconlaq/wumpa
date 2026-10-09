@@ -1,3 +1,5 @@
 # Feature plans
 
+- [Real-time Pi activity and session names](002-pi-activity.md) — Planned: embed a Pi extension in Wumpa, materialize it privately without a separate installation, and subscribe to pushed activity/name snapshots while preserving normal tmux interaction. Includes the reverted socket-path prototype and its test.
+
 - [Checkout agent sessions](001-agent-sessions.md) — Linux end-to-end implementation integrated: local-only control/agent CLI, private tmux servers, byte-safe caller environments, durable retry outcomes, restart recovery, pinned checkout identities, verified descendant cleanup, cached remote-safe summaries, and nested TUI/plain agent rows. Formatting, strict Clippy, Linux tests, Rust 1.85, and Apple cross-compilation validated. macOS agent execution remains explicitly unsupported pending verified descendant containment/runtime tests. Usage and NixOS configuration updated; actual service deployment/validation and the pinned binary release are unchanged. See the plan's current status and remaining completion gates.
