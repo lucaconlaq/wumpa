@@ -22,7 +22,7 @@ pub(crate) use unix::{Exchange, cleanup_socket, verify_peer};
 #[cfg(unix)]
 pub use unix::{Listener, handshake, preflight, sessions, tracked_folders};
 #[cfg(unix)]
-pub(crate) use unix::{local_request, recover_stale_socket};
+pub(crate) use unix::{local_request, recover_stale_tmux_socket, tmux_socket_metadata};
 
 #[cfg(not(unix))]
 pub struct Listener;
@@ -660,13 +660,27 @@ mod unix {
         remove_socket(&directory, path, identity, || {})
     }
 
-    /// Recover only refused, unchanged, owned sockets; never active endpoints.
-    pub(crate) fn recover_stale_socket(path: &Path) -> Result<bool> {
-        let identity = socket_metadata(path)?;
+    /// Validate tmux's private socket, including its attached-client mode.
+    pub(crate) fn tmux_socket_metadata(path: &Path) -> Result<Metadata> {
+        let metadata = fs::symlink_metadata(path)?;
+        // Tmux toggles the owner's execute bit when clients attach/detach.
+        // Never permit group/other access or relax ordinary control sockets.
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != user()
+            || !matches!(metadata.mode() & 0o7777, 0o600 | 0o700)
+        {
+            return Err("unsafe tmux endpoint".into());
+        }
+        Ok(metadata)
+    }
+
+    /// Recover only refused, unchanged, owned tmux sockets; never active endpoints.
+    pub(crate) fn recover_stale_tmux_socket(path: &Path) -> Result<bool> {
+        let identity = tmux_socket_metadata(path)?;
         match connect(path, CONNECT_TIMEOUT) {
             Ok(_) => Ok(false),
             Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                if !same_identity(&identity, &socket_metadata(path)?) {
+                if !same_identity(&identity, &tmux_socket_metadata(path)?) {
                     return Err("internal socket changed during stale check".into());
                 }
                 cleanup_socket(path, &identity)?;
@@ -1104,6 +1118,31 @@ mod unix {
             let dir = tempfile::tempdir().unwrap();
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
             dir
+        }
+
+        #[test]
+        fn tmux_socket_modes_do_not_relax_control_socket_permissions() {
+            let dir = directory();
+            let path = dir.path().join("tmux.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            for mode in [0o600, 0o700] {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                assert!(tmux_socket_metadata(&path).is_ok());
+                assert!(!recover_stale_tmux_socket(&path).unwrap());
+                assert_eq!(socket_metadata(&path).is_ok(), mode == 0o600);
+            }
+            for mode in [0o000, 0o400, 0o660, 0o770, 0o777, 0o1700] {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                assert!(tmux_socket_metadata(&path).is_err());
+                assert!(recover_stale_tmux_socket(&path).is_err());
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            let alias = dir.path().join("alias.sock");
+            symlink(&path, &alias).unwrap();
+            assert!(tmux_socket_metadata(&alias).is_err());
+            drop(listener);
+            assert!(recover_stale_tmux_socket(&path).unwrap());
+            assert!(!path.exists());
         }
 
         #[test]

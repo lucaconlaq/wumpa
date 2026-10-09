@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[track_caller]
 fn wait(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate() {
@@ -981,9 +982,10 @@ fn exercise_picker(interruption: Option<(libc::c_int, bool)>, scenario: PickerSc
     keyboard.write_all(b"Interactive review\r").unwrap();
     let mut new_id = String::new();
     wait(|| {
-        if let Some(session) = fixture.list()["sessions"]
+        let response = fixture.list();
+        if let Some(session) = response["sessions"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("session listing failed: {response}"))
             .iter()
             .find(|session| session["label"] == "Interactive review")
         {
@@ -1005,6 +1007,18 @@ fn exercise_picker(interruption: Option<(libc::c_int, bool)>, scenario: PickerSc
             .split(|byte| *byte == b'\n')
             .any(|line| line == backend.as_bytes())
     });
+    // Tmux marks its socket executable while a client is attached. Discovery
+    // must still work, not just win a race before attachment changes the mode.
+    wait(|| {
+        fs::metadata(fixture.dir.path().join(".c.sock.sessions/tmux.sock"))
+            .is_ok_and(|metadata| metadata.mode() & 0o7777 == 0o700)
+    });
+    let attached = fixture.list();
+    assert_eq!(
+        attached["sessions"].as_array().map(Vec::len),
+        Some(2),
+        "{attached}"
+    );
     keyboard.write_all(b"\x02d").unwrap();
     wait(|| child.0.try_wait().unwrap().is_some());
     assert!(child.0.wait().unwrap().success());

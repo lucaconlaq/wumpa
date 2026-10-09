@@ -394,16 +394,9 @@ impl Manager {
         };
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{FileTypeExt, MetadataExt};
             match std::fs::symlink_metadata(&self.socket) {
-                Ok(metadata) => {
-                    // SAFETY: geteuid only reads effective identity.
-                    if !metadata.file_type().is_socket()
-                        || metadata.uid() != unsafe { libc::geteuid() }
-                        || metadata.mode() & 0o7777 != 0o600
-                    {
-                        return Err("unsafe tmux endpoint".into());
-                    }
+                Ok(_) => {
+                    crate::control::tmux_socket_metadata(&self.socket)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
@@ -460,7 +453,7 @@ impl Manager {
             return Ok(false);
         }
         #[cfg(unix)]
-        if crate::control::recover_stale_socket(&self.socket)? {
+        if crate::control::recover_stale_tmux_socket(&self.socket)? {
             return Ok(false);
         }
         let instance = self.command(&["show-options", "-gqv", "@wumpa-instance"], deadline)?;
