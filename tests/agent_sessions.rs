@@ -225,7 +225,7 @@ fn dashboard_helper_discovers_socket_and_attaches_only_selected_existing_agent()
     assert_eq!(
         fs::read_to_string(&args).unwrap(),
         format!(
-            "-S\n{}\nattach-session\n={}\n",
+            "-S\n{}\nattach-session\n-t\n={}\n",
             target["socket"].as_str().unwrap(),
             target["session"].as_str().unwrap()
         )
