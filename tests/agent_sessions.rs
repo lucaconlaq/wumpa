@@ -183,6 +183,61 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn dashboard_helper_discovers_socket_and_attaches_only_selected_existing_agent() {
+    let fixture = Fixture::new();
+    let created = fixture.create(&"a".repeat(32));
+    let id = created["session_id"].as_str().unwrap();
+    let ready: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("ready")).unwrap()).unwrap();
+    let port = ready["port"].as_u64().unwrap().to_string();
+    let bin = fixture.dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tmux = bin.join("tmux");
+    let args = fixture.dir.path().join("attach-args");
+    fs::write(
+        &tmux,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ATTACH_ARGS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let attach = |id: &str, directory: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_wumpa"))
+            .args(["agent-attach", "--port", &port, "--session", id])
+            .current_dir(directory)
+            .env("PATH", &path)
+            .env("ATTACH_ARGS", &args)
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let output = attach(id, &fixture.repo);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let attachment = fixture.operation(json!({
+        "action": "attach", "session_id": id, "observations": fixture.observations()
+    }));
+    let target = &attachment["attachment"];
+    assert_eq!(
+        fs::read_to_string(&args).unwrap(),
+        format!(
+            "-S\n{}\nattach-session\n={}\n",
+            target["socket"].as_str().unwrap(),
+            target["session"].as_str().unwrap()
+        )
+    );
+    fs::remove_file(&args).unwrap();
+    assert!(!attach(&"b".repeat(32), &fixture.repo).status.success());
+    assert!(!attach(id, fixture.dir.path()).status.success());
+    assert!(!args.exists());
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn agent_exit_removes_extra_windows_and_preserves_retry_outcome() {
     let fixture = Fixture::new();
     fs::write(

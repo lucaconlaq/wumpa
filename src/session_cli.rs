@@ -10,6 +10,37 @@ mod picker;
 
 #[cfg(unix)]
 pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
+    run_selected(socket, retry, plain, None)
+}
+
+/// Attach only the requested existing agent; never open a picker or create one.
+#[cfg(unix)]
+pub fn attach_remote(port: u16, session_id: crate::sessions::SessionId) -> Result<()> {
+    let response = crate::transport::request(
+        &crate::config::Connection::Local { port },
+        &crate::protocol::Request::List,
+    )?;
+    if let Some(error) = response.error {
+        return Err(error.into());
+    }
+    let socket = response
+        .control_socket
+        .ok_or("Server lacks attachment discovery; update and restart the Wumpa server.")?;
+    run_selected(&socket, None, false, Some(session_id))
+}
+
+#[cfg(not(unix))]
+pub fn attach_remote(_port: u16, _session_id: crate::sessions::SessionId) -> Result<()> {
+    Err("agent attachment requires Unix".into())
+}
+
+#[cfg(unix)]
+fn run_selected(
+    socket: &Path,
+    retry: Option<&str>,
+    plain: bool,
+    attach: Option<crate::sessions::SessionId>,
+) -> Result<()> {
     use crate::{
         control, output,
         sessions::{Attachment, CreationId, Failure, LocalResponse, Operation},
@@ -40,6 +71,7 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
     let directory = std::env::current_dir()?;
     let checkout = match control::preflight(&handshake, &directory) {
         Ok(checkout) => checkout,
+        Err(error) if attach.is_some() => return Err(error),
         Err(_) => {
             let choices = control::tracked_folders(&handshake, &directory).map_err(|error| {
                 format!("Couldn't list Wumpa-tracked folders. Check the daemon, or restart it after updating Wumpa: {error}")
@@ -53,7 +85,9 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
             })?
         }
     };
-    let session_id = if let Some(retry) = retry {
+    let session_id = if let Some(session_id) = attach {
+        session_id
+    } else if let Some(retry) = retry {
         let (originating_run_id, id) = retry
             .split_once(':')
             .ok_or("--retry requires RUN_ID:REQUEST_ID")?;

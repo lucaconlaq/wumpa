@@ -86,6 +86,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
     let shared_config = Arc::new(Mutex::new(ServerConfig::default()));
     let mut control = crate::control::Listener::bind_with_config(socket, shared_config.clone())?;
     crate::control::install_shutdown_handlers()?;
+    let control_socket = socket.canonicalize()?;
     let path = config::path("server")?;
     let mut config: ServerConfig = config::load(&path)?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
@@ -162,6 +163,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
         let cloning = cloning.clone();
         let path = path.clone();
         let sessions = control.session_snapshot_reader();
+        let control_socket = control_socket.clone();
         std::thread::Builder::new()
             .name("request".into())
             .spawn(move || {
@@ -192,6 +194,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                     };
                     let config = config.lock().map_err(|_| "configuration lock poisoned")?;
                     let mut response = Response {
+                        control_socket: Some(control_socket),
                         repository_dir: config.repository_dir.clone(),
                         home_dir: std::env::var_os("HOME")
                             .map(PathBuf::from)

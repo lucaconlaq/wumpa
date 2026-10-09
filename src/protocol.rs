@@ -63,6 +63,10 @@ pub struct Preflight {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Response {
     pub repositories: Vec<String>,
+    /// Discovery hint for the server-local attachment helper, not a tmux target.
+    /// The helper must authenticate this endpoint through the local handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_socket: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_dir: Option<PathBuf>,
     /// Server home used only for display; never inferred from the repository root.

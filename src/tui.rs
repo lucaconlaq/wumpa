@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod github;
+mod ssh;
 mod view;
 mod zed;
 
@@ -140,6 +141,7 @@ struct App {
     details: bool,
     details_scroll: u16,
     zed_launch: Option<zed::Launch>,
+    ssh_command: Option<std::process::Command>,
     job: Option<Job>,
     status: String,
     error: bool,
@@ -169,6 +171,7 @@ impl App {
             details: false,
             details_scroll: 0,
             zed_launch: None,
+            ssh_command: None,
             job: None,
             status: "Welcome. Select a server and press Enter, or press n to add one.".into(),
             error: false,
@@ -475,7 +478,7 @@ impl App {
         Some((&self.repositories[index], worktree))
     }
 
-    fn zed_target(&self) -> Result<String> {
+    fn checkout_target(&self) -> Result<(&Connection, &std::path::Path)> {
         let target = self
             .connected
             .filter(|target| self.workspace == Some(*target))
@@ -495,13 +498,55 @@ impl App {
                 })
         });
         if metadata.is_some_and(|worktree| worktree.bare || worktree.prunable) {
-            return Err("This worktree is bare or prunable and cannot be opened in Zed.".into());
+            return Err("This worktree is bare or prunable and cannot be opened.".into());
         }
         let checkout = worktree
             .map(|worktree| &worktree.path)
             .or(entry.checkout_path.as_ref())
-            .ok_or("This repository is not cloned. Clone it first, then open it in Zed.")?;
-        zed::target(&self.config.servers[target].connection, checkout)
+            .ok_or("This repository is not cloned. Clone it first.")?;
+        Ok((&self.config.servers[target].connection, checkout))
+    }
+
+    fn zed_target(&self) -> Result<String> {
+        let (connection, checkout) = self.checkout_target()?;
+        zed::target(connection, checkout)
+    }
+
+    fn attach_agent(&mut self) {
+        let result = (|| {
+            let agent = self.selected_agent().ok_or("Select an agent first.")?;
+            let (connection, _) = self.checkout_target()?;
+            ssh::attach(connection, &agent.checkout, &agent.id)
+        })();
+        match result {
+            Ok(command) => {
+                self.details = false;
+                self.ssh_command = Some(command);
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                self.error = true;
+            }
+        }
+    }
+
+    fn open_ssh(&mut self) {
+        if self.selected_agent().is_some() {
+            return;
+        }
+        match self
+            .checkout_target()
+            .and_then(|(connection, checkout)| ssh::command(connection, checkout))
+        {
+            Ok(command) => {
+                self.details = false;
+                self.ssh_command = Some(command);
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                self.error = true;
+            }
+        }
     }
 
     fn open_zed(&mut self) {
@@ -544,6 +589,10 @@ impl App {
                     self.details = false;
                     self.open_zed();
                 }
+                KeyCode::Enter if self.job.is_none() && self.selected_agent().is_some() => {
+                    self.attach_agent();
+                }
+                KeyCode::Char('t') if self.job.is_none() => self.open_ssh(),
                 KeyCode::Char('s') => self.switch_servers(),
                 KeyCode::Char('q') => return true,
                 _ => {}
@@ -621,6 +670,9 @@ impl App {
                 self.details = true;
                 self.details_scroll = 0;
             }
+            KeyCode::Char('t') if self.pane == Pane::Repositories && self.job.is_none() => {
+                self.open_ssh()
+            }
             KeyCode::Char('z') if self.pane == Pane::Repositories && self.job.is_none() => {
                 self.open_zed()
             }
@@ -672,6 +724,13 @@ impl App {
                 if let Some(target) = self.servers.selected() {
                     self.open_workspace(target);
                 }
+            }
+            KeyCode::Enter
+                if self.pane == Pane::Repositories
+                    && self.job.is_none()
+                    && self.selected_agent().is_some() =>
+            {
+                self.attach_agent();
             }
             KeyCode::Char('r') | KeyCode::Enter
                 if self.pane == Pane::Repositories && self.job.is_none() =>
@@ -729,6 +788,38 @@ pub fn run() -> Result<()> {
     let mut app = App::new(config, path);
     app.resume();
     loop {
+        if let Some(mut command) = app.ssh_command.take() {
+            crossterm::execute!(io::stdout(), event::DisableBracketedPaste)?;
+            ratatui::restore();
+            // Leaving the alternate screen does not restore cursor visibility.
+            terminal.show_cursor()?;
+            let result = command.status();
+            match result {
+                Ok(status) if status.success() => {
+                    app.status = "SSH session ended.".into();
+                    app.error = false;
+                }
+                Ok(status) => {
+                    app.status = format!("SSH exited with {status}.");
+                    app.error = true;
+                }
+                Err(error) => {
+                    app.status = format!("Could not start SSH: {error}");
+                    app.error = true;
+                }
+            }
+            if app.error {
+                // Keep inherited SSH/helper diagnostics visible on the normal
+                // screen before returning to the dashboard's alternate screen.
+                eprintln!("\n{}", crate::output::clean(&app.status));
+                eprintln!("If agent-attach is unrecognized, update wumpa on the remote SSH PATH.");
+                eprintln!("Press Enter to return to Wumpa.");
+                let mut line = String::new();
+                io::stdin().read_line(&mut line)?;
+            }
+            terminal = ratatui::try_init()?;
+            crossterm::execute!(io::stdout(), event::EnableBracketedPaste)?;
+        }
         app.poll();
         terminal.draw(|frame| app.draw(frame))?;
         if event::poll(Duration::from_millis(100))? {
@@ -986,6 +1077,37 @@ mod tests {
     }
 
     #[test]
+    fn ssh_action_queues_selected_checkout_and_rejects_uncloned_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = removal_app(dir.path().join("client.json"));
+        app.config.servers[1].connection = Connection::Ssh {
+            host: "dev-host".into(),
+            port: 7432,
+        };
+        app.pane = Pane::Repositories;
+        app.repositories = vec![Repository {
+            url: "ssh://host/repo.git".into(),
+            checkout_path: Some(PathBuf::from("/projects/repo")),
+        }];
+        app.repos.select(Some(0));
+        assert!(screen(&mut app, 100, 30).contains("SSH"));
+        app.key(key(KeyCode::Char('t')));
+        let command = app.ssh_command.take().unwrap();
+        assert_eq!(
+            command.get_args().last().unwrap(),
+            "cd '/projects/repo' && exec /bin/sh -c 'exec \"${SHELL:-/bin/sh}\" -i'"
+        );
+        app.details = true;
+        app.key(key(KeyCode::Char('t')));
+        assert!(!app.details);
+        assert!(app.ssh_command.take().is_some());
+        app.repositories[0].checkout_path = None;
+        app.key(key(KeyCode::Char('t')));
+        assert!(app.ssh_command.is_none());
+        assert!(app.error);
+    }
+
+    #[test]
     fn repository_rows_show_names_only_and_details_are_modal_and_scrollable() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = removal_app(dir.path().join("client.json"));
@@ -1161,6 +1283,27 @@ mod tests {
         assert_eq!(app.zed_target().unwrap(), "ssh://dev-host/repo");
         assert!(screen(&mut app, 100, 30).contains("🤖"));
         assert_eq!(app.selected_agent().unwrap().id, first.id);
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("Attach"));
+        assert!(!text.contains(" t  SSH"));
+        app.key(key(KeyCode::Char('t')));
+        assert!(app.ssh_command.is_none());
+        app.key(key(KeyCode::Enter));
+        let command = app.ssh_command.take().unwrap();
+        assert_eq!(
+            command.get_args().last().unwrap().to_str().unwrap(),
+            format!(
+                "cd '/repo' && exec wumpa agent-attach --port 7432 --session {}",
+                "a".repeat(32)
+            )
+        );
+        app.details = true;
+        app.key(key(KeyCode::Char('t')));
+        assert!(app.ssh_command.is_none());
+        assert!(!screen(&mut app, 100, 30).contains("t SSH"));
+        app.key(key(KeyCode::Enter));
+        assert!(app.ssh_command.take().is_some());
+        assert!(!app.details);
         let repositories = app.repositories.clone();
         complete_job(
             &mut app,

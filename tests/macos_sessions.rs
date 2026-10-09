@@ -94,6 +94,23 @@ fn macos_rejects_agent_operations_without_launching_and_keeps_browsing_available
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
+    let helper = Command::new(env!("CARGO_BIN_EXE_wumpa"))
+        .args([
+            "agent-attach",
+            "--port",
+            &port.to_string(),
+            "--session",
+            &"a".repeat(32),
+        ])
+        .current_dir(&repo)
+        .env_remove("TMUX")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!helper.status.success());
+    assert!(
+        String::from_utf8_lossy(&helper.stderr).contains("Agent sessions require a Linux server")
+    );
     let before = fs::read(&config).unwrap();
     let handshake = request(&socket, json!({"action": "handshake", "version": 1}));
     let observations = json!({

@@ -279,8 +279,10 @@ impl App {
                 ),
             rows[2],
         );
-        let actions = if in_workspace {
-            vec![("a", "Clone"), ("i", "Details"), ("z", "Zed")]
+        let actions = if in_workspace && self.selected_agent().is_some() {
+            vec![("Enter", "Attach"), ("i", "Details"), ("z", "Zed")]
+        } else if in_workspace {
+            vec![("a", "Clone"), ("i", "Details"), ("z", "Zed"), ("t", "SSH")]
         } else {
             vec![("Enter", "Open"), ("n", "New server"), ("d", "Remove")]
         };
@@ -403,8 +405,12 @@ impl App {
         self.details_scroll = self.details_scroll.min(max_scroll);
         frame.render_widget(Paragraph::new(lines).scroll((self.details_scroll, 0)), body);
         frame.render_widget(
-            Paragraph::new("↑↓ Scroll · i/Esc Close · z Open in Zed")
-                .style(Style::default().fg(ACCENT)),
+            Paragraph::new(if self.selected_agent().is_some() {
+                "↑↓ Scroll · i/Esc Close · z Open in Zed · Enter Attach"
+            } else {
+                "↑↓ Scroll · i/Esc Close · z Open in Zed · t SSH"
+            })
+            .style(Style::default().fg(ACCENT)),
             Rect::new(body.x, popup.y + height - 2, body.width, 1),
         );
     }

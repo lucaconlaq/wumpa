@@ -57,6 +57,14 @@ enum Commands {
         #[arg(long)]
         retry: Option<String>,
     },
+    /// Internal SSH entry point for attachment to an existing agent
+    #[command(hide = true)]
+    AgentAttach {
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        #[arg(long)]
+        session: String,
+    },
     /// Internal persistent agent supervisor
     #[command(hide = true)]
     AgentRunner {
@@ -141,6 +149,9 @@ fn run() -> Result<()> {
         }
         Some(Commands::Agent { socket, retry }) => {
             session_cli::run(&socket, retry.as_deref(), cli.plain)
+        }
+        Some(Commands::AgentAttach { port, session }) => {
+            session_cli::attach_remote(port, sessions::SessionId::try_from(session)?)
         }
         Some(Commands::AgentRunner { channel, id }) => session_runtime::run_agent(&channel, &id),
         Some(Commands::CloneHelper) => helper::run(),
