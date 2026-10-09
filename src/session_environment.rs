@@ -305,6 +305,12 @@ mod unix {
     }
 
     impl PreparedEnvironment {
+        /// Return a normalized local launch payload when the CLI explicitly picks
+        /// a different checkout. Relative PATH entries still use its original cwd.
+        pub fn into_environment(self) -> Environment {
+            self.0
+        }
+
         /// Resolve only using the caller's adjusted PATH. No shell or service PATH.
         /// This is a pre-launch check, not protection against filesystem races.
         pub fn resolve_executable(&self, configured: &str) -> Result<PathBuf, Error> {

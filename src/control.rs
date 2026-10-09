@@ -20,7 +20,7 @@ pub fn validate_path(path: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub(crate) use unix::{Exchange, cleanup_socket, verify_peer};
 #[cfg(unix)]
-pub use unix::{Listener, handshake, preflight, sessions};
+pub use unix::{Listener, handshake, preflight, sessions, tracked_folders};
 #[cfg(unix)]
 pub(crate) use unix::{local_request, recover_stale_socket};
 
@@ -99,6 +99,11 @@ mod unix {
         Sessions {
             request: Box<crate::sessions::LocalRequest>,
         },
+        TrackedFolders {
+            version: u32,
+            run_id: String,
+            directory: crate::checkout::Observation,
+        },
         Preflight {
             version: u32,
             run_id: String,
@@ -121,6 +126,37 @@ mod unix {
     pub struct Preflight {
         pub checkout: Option<crate::checkout::Checkout>,
         pub error: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TrackedFolders {
+        folders: Vec<crate::checkout::TrackedFolder>,
+        error: Option<String>,
+    }
+
+    /// Read-only local folder choices from this daemon's registration snapshot.
+    pub fn tracked_folders(
+        handshake: &Handshake,
+        directory: &Path,
+    ) -> Result<Vec<crate::checkout::TrackedFolder>> {
+        let response: TrackedFolders = local_request(
+            &handshake.socket,
+            &Request::TrackedFolders {
+                version: VERSION,
+                run_id: handshake.run_id.clone(),
+                directory: crate::checkout::Observation::read(directory)?,
+            },
+            EXCHANGE_TIMEOUT,
+        )?;
+        if let Some(error) = response.error {
+            return Err(error.into());
+        }
+        if response.folders.len() > 128 || serde_json::to_vec(&response.folders)?.len() > 128 * 1024
+        {
+            return Err("invalid tracked folder discovery response".into());
+        }
+        Ok(response.folders)
     }
 
     /// Internal preflight helper; run mismatches require a fresh handshake.
@@ -758,6 +794,39 @@ mod unix {
                 };
                 protocol::write_message(&response, &mut exchange)
             }
+            Request::TrackedFolders {
+                version,
+                run_id,
+                directory,
+            } => {
+                let result = (|| -> Result<Vec<crate::checkout::TrackedFolder>> {
+                    if version != VERSION || run_id != handshake.run_id {
+                        return Err(
+                            "control version or daemon run changed; repeat handshake".into()
+                        );
+                    }
+                    if crate::checkout::Observation::read(&directory.path)? != directory {
+                        return Err("caller and daemon directory observations disagree".into());
+                    }
+                    let repositories = config
+                        .lock()
+                        .map_err(|_| "configuration lock poisoned")?
+                        .repositories
+                        .clone();
+                    crate::checkout::tracked_folders(&repositories, deadline)
+                })();
+                let response = match result {
+                    Ok(folders) => TrackedFolders {
+                        folders,
+                        error: None,
+                    },
+                    Err(error) => TrackedFolders {
+                        folders: Vec::new(),
+                        error: Some(error.to_string()),
+                    },
+                };
+                protocol::write_message(&response, &mut exchange)
+            }
             Request::Preflight {
                 version,
                 run_id,
@@ -1080,6 +1149,7 @@ mod unix {
             let listener = Listener::bind_with_config(&path, config.clone()).unwrap();
             let first = handshake(&path).unwrap();
             assert!(preflight(&first, &repo).is_err());
+            assert!(tracked_folders(&first, &repo).unwrap().is_empty());
             config
                 .lock()
                 .unwrap()
@@ -1090,6 +1160,34 @@ mod unix {
                 });
             let before = serde_json::to_vec(&*config.lock().unwrap()).unwrap();
             let checkout = preflight(&first, &repo).unwrap();
+            let choices = tracked_folders(&first, &repo).unwrap();
+            assert_eq!(choices.len(), 1);
+            assert_eq!(choices[0].path, repo.canonicalize().unwrap());
+            assert!(choices[0].error.is_none());
+            let invalid: TrackedFolders = local_request(
+                &path,
+                &Request::TrackedFolders {
+                    version: VERSION + 1,
+                    run_id: first.run_id.clone(),
+                    directory: crate::checkout::Observation::read(&repo).unwrap(),
+                },
+                EXCHANGE_TIMEOUT,
+            )
+            .unwrap();
+            assert!(invalid.folders.is_empty() && invalid.error.is_some());
+            let mut directory = crate::checkout::Observation::read(&repo).unwrap();
+            directory.inode ^= 1;
+            let mismatch: TrackedFolders = local_request(
+                &path,
+                &Request::TrackedFolders {
+                    version: VERSION,
+                    run_id: first.run_id.clone(),
+                    directory,
+                },
+                EXCHANGE_TIMEOUT,
+            )
+            .unwrap();
+            assert!(mismatch.folders.is_empty() && mismatch.error.is_some());
             let mut mismatch = checkout.clone();
             mismatch.root.inode ^= 1;
             let request = serde_json::to_vec(&Request::Preflight {
@@ -1116,6 +1214,18 @@ mod unix {
                     .contains("repeat handshake")
             );
             assert!(preflight(&handshake(&path).unwrap(), &repo).is_ok());
+            assert!(
+                tracked_folders(&first, &repo)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("repeat handshake")
+            );
+            assert_eq!(
+                tracked_folders(&handshake(&path).unwrap(), &repo)
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
 
         #[test]

@@ -63,6 +63,38 @@ impl From<CreationId> for String {
     }
 }
 
+/// Maximum Unicode characters in a user-visible session name.
+pub const MAX_NAME_CHARACTERS: usize = 64;
+
+/// Display-only name; never used as an executable, argument, or tmux identifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SessionName(String);
+
+impl TryFrom<String> for SessionName {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+        {
+            return Err("Session names must be a single line without control characters.");
+        }
+        let value = value.trim();
+        if value.is_empty() || value.chars().count() > MAX_NAME_CHARACTERS {
+            return Err("Session names must contain 1–64 characters.");
+        }
+        Ok(Self(value.into()))
+    }
+}
+
+impl From<SessionName> for String {
+    fn from(name: SessionName) -> Self {
+        name.0
+    }
+}
+
 /// Checkout association, independent of the caller's subdirectory or agent cwd.
 /// These observations are NOT a durable removal/replacement identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +133,7 @@ pub struct Session {
     /// Canonical control socket path, stable across daemon restarts.
     pub instance: PathBuf,
     pub checkout: CheckoutAssociation,
-    /// Daemon-selected display label, not an executable or backend identifier.
+    /// Validated user name or daemon default, never an executable/backend identifier.
     pub label: String,
     pub state: State,
 }
@@ -162,6 +194,9 @@ pub enum Operation {
         request_id: CreationId,
         observations: Box<Checkout>,
         environment: Environment,
+        /// Optional display name; omission preserves legacy clients' default label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<SessionName>,
     },
     /// After re-handshake, look up the original attempt; never launch from a retry.
     RetryCreate {
@@ -298,6 +333,40 @@ mod tests {
     }
 
     #[test]
+    fn session_names_are_bounded_validated_and_display_only() {
+        for value in [
+            "".into(),
+            " ".into(),
+            "x".repeat(65),
+            "line\nbreak".into(),
+            "\x1b[31m".into(),
+            "name\u{2028}line".into(),
+        ] {
+            assert!(serde_json::from_value::<SessionName>(serde_json::json!(value)).is_err());
+        }
+        let name = SessionName::try_from("  Review 🤖  ".to_owned()).unwrap();
+        assert_eq!(String::from(name), "Review 🤖");
+        assert!(SessionName::try_from("🤖".repeat(64)).is_ok());
+        let mut create = serde_json::to_value(Operation::Create {
+            request_id: record().request_id,
+            observations: Box::new(checkout()),
+            environment: Environment::default(),
+            name: None,
+        })
+        .unwrap();
+        assert!(create.get("name").is_none());
+        assert!(serde_json::from_value::<Operation>(create.clone()).is_ok());
+        create["name"] = serde_json::json!("named session");
+        assert!(serde_json::from_value::<Operation>(create.clone()).is_ok());
+        create["name"] = serde_json::json!("invalid\nname");
+        assert!(serde_json::from_value::<Operation>(create.clone()).is_err());
+        create["action"] = serde_json::json!("list");
+        create.as_object_mut().unwrap().remove("request_id");
+        create.as_object_mut().unwrap().remove("environment");
+        assert!(serde_json::from_value::<Operation>(create).is_err());
+    }
+
+    #[test]
     fn ids_are_bounded_and_validated_on_decode() {
         for value in ["".into(), "a".repeat(31), "a".repeat(33), "G".repeat(32)] {
             let json = serde_json::to_string(&value).unwrap();
@@ -345,6 +414,7 @@ mod tests {
                 request_id: record.request_id.clone(),
                 observations: Box::new(checkout()),
                 environment: Environment::default(),
+                name: None,
             },
             Operation::RetryCreate {
                 request_id: record.request_id.clone(),
@@ -387,6 +457,7 @@ mod tests {
             request_id: record().request_id,
             observations: Box::new(checkout()),
             environment: environment.clone(),
+            name: None,
         };
         let json = serde_json::to_vec(&create).unwrap();
         assert_eq!(serde_json::from_slice::<Operation>(&json).unwrap(), create);
@@ -470,6 +541,7 @@ mod tests {
             request_id: record().request_id,
             observations: Box::new(checkout()),
             environment: Environment::default(),
+            name: None,
         };
         let mut json = serde_json::to_value(operation).unwrap();
         json["command"] = serde_json::json!(["arbitrary-command"]);

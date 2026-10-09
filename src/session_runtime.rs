@@ -754,11 +754,12 @@ impl Manager {
                 Operation::Create {
                     request_id,
                     environment,
+                    name,
                     ..
                 } => {
                     #[cfg(not(target_os = "linux"))]
                     {
-                        let _ = (request_id, environment);
+                        let _ = (request_id, environment, name);
                         return Err(Failure::BackendUnavailable);
                     }
                     #[cfg(target_os = "linux")]
@@ -826,11 +827,13 @@ impl Manager {
                                 id: id.clone(),
                                 instance: self.instance.clone(),
                                 checkout: association,
-                                label: Path::new(&config.agent_command.arguments()[0])
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or("agent")
-                                    .into(),
+                                label: name.map(String::from).unwrap_or_else(|| {
+                                    Path::new(&config.agent_command.arguments()[0])
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("agent")
+                                        .into()
+                                }),
                                 state: State::Starting,
                             },
                         };

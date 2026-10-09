@@ -26,8 +26,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Use the plain text menu instead of the terminal dashboard
-    #[arg(long)]
+    /// Use plain text menus instead of interactive terminal interfaces
+    #[arg(long, global = true)]
     plain: bool,
     #[command(subcommand)]
     command: Option<Commands>,
@@ -139,7 +139,9 @@ fn run() -> Result<()> {
                 server::serve(port, &socket, ready_file.as_deref())
             }
         }
-        Some(Commands::Agent { socket, retry }) => session_cli::run(&socket, retry.as_deref()),
+        Some(Commands::Agent { socket, retry }) => {
+            session_cli::run(&socket, retry.as_deref(), cli.plain)
+        }
         Some(Commands::AgentRunner { channel, id }) => session_runtime::run_agent(&channel, &id),
         Some(Commands::CloneHelper) => helper::run(),
         Some(Commands::CheckClone {
@@ -201,6 +203,30 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_accepts_plain_before_or_after_the_subcommand() {
+        for arguments in [
+            vec![
+                "wumpa",
+                "--plain",
+                "agent",
+                "--socket",
+                "/private/control.sock",
+            ],
+            vec![
+                "wumpa",
+                "agent",
+                "--plain",
+                "--socket",
+                "/private/control.sock",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(cli.plain);
+            assert!(matches!(cli.command, Some(Commands::Agent { .. })));
+        }
+    }
 
     #[test]
     fn cli_definition_is_valid() {

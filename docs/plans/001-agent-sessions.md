@@ -23,8 +23,25 @@ unsupported rather than using an unsafe process-group-only fallback.
 - Review findings in `issues.md` are addressed, including whole-session cleanup,
   nonblocking unsafe-record rejection, fail-closed managed removal, fresh response
   snapshots, pinned-root relative execution, and explicit dashboard discovery states.
-- `cargo +1.85.0 test --locked`: 150 tests pass, including 12 isolated Linux tmux
-  integration tests and managed-removal/runtime-identity unit tests.
+- Interactive agent UX now provides compact inline arrow-key selection and a
+  new-session naming form (including the first session), with a plain-text fallback.
+  The 7–10-line viewport preserves shell scrollback and never switches screen
+  buffers. Names are validated display-only metadata, retained through retries/
+  restarts and shown in dashboards.
+- Picker signal-cleanup review finding addressed: scoped SIGTERM/SIGINT/SIGHUP
+  handlers and bounded input polling restore terminal modes before aborting
+  selection. Original signal handlers are restored before launch/attachment.
+- Untracked-folder recovery now uses the same inline picker. A run-bound, local
+  read-only discovery request verifies the original caller directory observation,
+  lists tracked roots/worktrees, and marks unavailable entries. Selection performs
+  fresh checkout preflight, preserves original-cwd PATH semantics, and never changes
+  the parent shell directory. Folder rows show one full tracked path each, without
+  a duplicated basename, redundant current-directory line, or shell shortcut hint.
+  Selection/cancellation leaves no extra status chatter.
+- `cargo +1.85.0 test --locked`: 166 tests pass, including 19 isolated Linux tmux
+  integration tests, real PTY folder/session selection, attach/detach and terminal
+  signal-interruption tests (including initialization), and managed-removal/
+  runtime-identity unit tests.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
   `git diff --check` pass.
 - `cargo +1.85.0 check --locked --target aarch64-apple-darwin` passes without
@@ -130,7 +147,9 @@ Step 3 session model and retry contract implemented as internal types.
 
 ## Goal
 Run `wumpa agent` on the daemon's machine, inside a registered main checkout or
-linked worktree, including subdirectories. The CLI contacts the selected daemon
+linked worktree, including subdirectories, or explicitly select a tracked checkout
+from an inline recovery picker when the current directory cannot pass preflight.
+The CLI contacts the selected daemon
 through a Unix socket; the daemon validates the checkout and creates or discovers
 coding-agent sessions, defaulting to `pi`. The CLI attaches its terminal directly
 to the selected session. Remote dashboards can see sessions but cannot create or
@@ -233,8 +252,11 @@ attach to them in this scope.
   backend action. Each operation carries mandatory checkout observations; daemon
   registration/membership and owned-session association must be revalidated.
   Session checkout association excludes the caller subdirectory and agent cwd.
-- Session metadata and local attachment details are distinct. Labels are selected
-  by the daemon for display, not accepted as commands. Starting/running/stopping
+- Session metadata and local attachment details are distinct. New creation accepts
+  an optional validated display name (1–64 Unicode characters, trimmed, single-line,
+  no control characters); omission retains the daemon-selected command label.
+  Names are visible remotely and never affect commands or backend identifiers.
+  Repeated creation/retry keys retain the original name. Starting/running/stopping
   and cleanup-failed states describe live or incompletely cleaned-up sessions;
   successful agent exit removes the session, without retaining terminal output.
 - Reserve a creation key scoped to the canonical instance and originating daemon
@@ -255,6 +277,13 @@ attach to them in this scope.
   incomplete, or unavailable evidence fails explicitly without a duplicate launch.
   Returning a previously created ID does not promise it is still attachable:
   attachment separately revalidates ownership, checkout, and running state.
+- Read-only tracked-folder discovery is Unix-only and run-bound, checks matching
+  original-directory path/device/inode observations, and uses a cloned registration
+  snapshot without holding the config mutex during Git. Results are suggestions,
+  never authorization: fresh preflight/session validation is mandatory after
+  selection. Discovery shares the five-second control exchange budget and caps
+  choices at 128 folders and 128 KiB; unavailable entries remain explicitly marked.
+  No TCP/config-file fallback or configuration mutation is permitted.
 - Recovery records contain only instance/run/request/session identities, checkout
   association, and typed outcome. No launch environment, terminal output, or
   secret-bearing error text is retained. Backend discovery remains authoritative
@@ -465,9 +494,17 @@ The following criteria are retained for reference.
      stopping as detach. Other daemon instances detect the removal independently.
    - Report missing tmux/agent executables and bounded subprocess failures clearly.
 5. Add the public local `wumpa agent` flow.
-   - Require `--socket /absolute/path`; perform handshake and preflight.
-   - With no matching live sessions, request creation and attach. Otherwise show a
-     numbered list plus create-new/cancel choices; allow multiple agents per checkout.
+   - Require `--socket /absolute/path`; perform handshake and preflight. If the
+     current folder cannot pass preflight, use a daemon-backed inline tracked-folder
+     picker (main/linked checkouts). Unavailable folders are marked and disabled;
+     selection always reruns preflight. Preserve the invoking directory's relative
+     PATH semantics and keep the parent shell cwd unchanged. Cancellation has no
+     launch side effects.
+   - With no matching live sessions, prompt for a name before creation and attach.
+     Otherwise use a compact inline arrow-key picker with resume/new/cancel choices. New creation
+     always prompts for a display-only name; blank selects the daemon default.
+     Retain numbered selection/name prompts for `--plain` or non-terminal input;
+     EOF cancels without launching. Allow multiple agents per checkout.
    - Request attachment by Wumpa session ID. The daemon returns the initial tmux
      socket/session target; terminal traffic bypasses the Wumpa control connection.
    - Attach outside tmux; switch within the same tmux server. Detect a different

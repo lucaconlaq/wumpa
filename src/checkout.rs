@@ -19,7 +19,8 @@ pub struct Observation {
 }
 
 impl Observation {
-    fn read(path: &Path) -> Result<Self> {
+    /// Observe a directory without requiring it to be a Git checkout.
+    pub fn read(path: &Path) -> Result<Self> {
         if !path.is_absolute() || path.to_str().is_none() {
             return Err("checkout paths must be absolute UTF-8 paths".into());
         }
@@ -99,6 +100,101 @@ pub fn observe(directory: &Path, deadline: Instant) -> Result<Checkout> {
         }
     }
     Ok(checkout)
+}
+
+/// A daemon-advertised folder choice, not authorization to launch or attach.
+/// Unavailable registrations remain visible but cannot be selected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackedFolder {
+    pub path: PathBuf,
+    pub error: Option<String>,
+}
+
+/// List registered roots and their linked worktrees within one discovery budget.
+/// Selected folders still require fresh caller/daemon preflight observations.
+pub fn tracked_folders(
+    repositories: &[Repository],
+    deadline: Instant,
+) -> Result<Vec<TrackedFolder>> {
+    let mut folders = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut add = |path: &Path, error: Option<&str>| -> Result<()> {
+        let path = if path.is_absolute() {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        };
+        if seen.insert(path.clone()) {
+            if folders.len() >= 128 {
+                return Err("Too many tracked folders to list; select a checkout with cd.".into());
+            }
+            folders.push(TrackedFolder {
+                path,
+                error: error.map(str::to_owned),
+            });
+        }
+        Ok(())
+    };
+    for repository in repositories {
+        if Instant::now() >= deadline {
+            return Err("Listing tracked folders timed out; retry when Git is available.".into());
+        }
+        let Some(path) = &repository.checkout_path else {
+            continue;
+        };
+        if !path.is_absolute() {
+            add(path, Some("Tracked path must be absolute."))?;
+            continue;
+        }
+        let registered = match observe(path, deadline) {
+            Ok(checkout) if checkout.directory == checkout.root => checkout,
+            _ => {
+                add(
+                    path,
+                    Some("Folder unavailable; check its saved path, permissions, and Git access."),
+                )?;
+                continue;
+            }
+        };
+        let entries = match worktrees::list(&registered.root.path, deadline) {
+            Ok(entries) => entries,
+            Err(_) => {
+                add(
+                    path,
+                    Some("Git discovery unavailable; check this checkout."),
+                )?;
+                continue;
+            }
+        };
+        for entry in entries.into_iter().filter(|entry| !entry.bare) {
+            if Instant::now() >= deadline {
+                return Err(
+                    "Listing tracked folders timed out; retry when Git is available.".into(),
+                );
+            }
+            let usable = !entry.prunable
+                && observe(&entry.path, deadline).is_ok_and(|checkout| {
+                    checkout.directory == checkout.root
+                        && checkout.common_directory == registered.common_directory
+                });
+            add(
+                &entry.path,
+                (!usable).then_some(
+                    "Worktree unavailable; check its path, permissions, and Git membership.",
+                ),
+            )?;
+        }
+    }
+    if Instant::now() >= deadline {
+        return Err("Listing tracked folders timed out; retry when Git is available.".into());
+    }
+    if serde_json::to_vec(&folders)?.len() > 128 * 1024 {
+        return Err(
+            "Tracked folder list exceeds its size budget; select a checkout with cd.".into(),
+        );
+    }
+    Ok(folders)
 }
 
 /// Validate against an in-memory registration snapshot; never mutate configuration.
@@ -200,6 +296,30 @@ mod tests {
         }];
         let before = repositories.clone();
         let deadline = || Instant::now() + Duration::from_secs(5);
+        let choices = tracked_folders(&repositories, deadline()).unwrap();
+        assert_eq!(choices.len(), 2);
+        assert!(choices.iter().all(|folder| folder.error.is_none()));
+        assert!(
+            choices
+                .iter()
+                .any(|folder| folder.path == linked.canonicalize().unwrap())
+        );
+        assert!(tracked_folders(&repositories, Instant::now()).is_err());
+        let mut unavailable = repositories.clone();
+        unavailable.push(Repository {
+            url: "missing".into(),
+            checkout_path: Some(temp.path().join("missing")),
+        });
+        let choices = tracked_folders(&unavailable, deadline()).unwrap();
+        assert_eq!(choices.len(), 3);
+        assert!(
+            choices
+                .iter()
+                .find(|folder| folder.path == temp.path().join("missing"))
+                .unwrap()
+                .error
+                .is_some()
+        );
         for root in [&main, &linked] {
             let sub = root.join("sub");
             std::fs::create_dir(&sub).unwrap();
@@ -219,6 +339,12 @@ mod tests {
             std::os::unix::fs::symlink(&linked, &alias).unwrap();
             let caller = observe(&alias, deadline()).unwrap();
             assert!(validate(&alias, &caller, &repositories, deadline()).is_ok());
+            let mut aliases = repositories.clone();
+            aliases.push(Repository {
+                url: "alias".into(),
+                checkout_path: Some(alias),
+            });
+            assert_eq!(tracked_folders(&aliases, deadline()).unwrap().len(), 2);
         }
         let nested = main.join("independent");
         std::fs::create_dir(&nested).unwrap();

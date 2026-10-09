@@ -4,13 +4,17 @@ use crate::Result;
 use std::path::Path;
 
 #[cfg(unix)]
-pub fn run(socket: &Path, retry: Option<&str>) -> Result<()> {
+mod folders;
+#[cfg(unix)]
+mod picker;
+
+#[cfg(unix)]
+pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
     use crate::{
         control, output,
         sessions::{Attachment, CreationId, Failure, LocalResponse, Operation},
     };
     use std::{
-        io::{BufRead, Write},
         os::unix::ffi::{OsStrExt, OsStringExt},
         process::Command,
     };
@@ -34,7 +38,21 @@ pub fn run(socket: &Path, retry: Option<&str>) -> Result<()> {
         false
     };
     let directory = std::env::current_dir()?;
-    let checkout = control::preflight(&handshake, &directory)?;
+    let checkout = match control::preflight(&handshake, &directory) {
+        Ok(checkout) => checkout,
+        Err(_) => {
+            let choices = control::tracked_folders(&handshake, &directory).map_err(|error| {
+                format!("Couldn't list Wumpa-tracked folders. Check the daemon, or restart it after updating Wumpa: {error}")
+            })?;
+            let Some(selected) = folders::choose(&choices, &directory, plain)? else {
+                return Ok(());
+            };
+            // A displayed path is only a suggestion, never launch authorization.
+            control::preflight(&handshake, &selected).map_err(|_| {
+                format!("Couldn't open {}. Check its path, permissions, and Git membership, then retry.", output::clean(&selected.display().to_string()))
+            })?
+        }
+    };
     let session_id = if let Some(retry) = retry {
         let (originating_run_id, id) = retry
             .split_once(':')
@@ -70,51 +88,24 @@ pub fn run(socket: &Path, retry: Option<&str>) -> Result<()> {
             }
             _ => return Err("invalid agent list response".into()),
         };
-        let selected = if sessions.is_empty() {
-            None
-        } else {
-            for (index, session) in sessions.iter().enumerate() {
-                let id: String = session.id.clone().into();
-                println!(
-                    "{}) {} · {} · {:?}",
-                    index + 1,
-                    output::clean(&session.label),
-                    id,
-                    session.state
-                );
-            }
-            print!("n) Create new   q) Cancel\nChoice: ");
-            std::io::stdout().flush()?;
-            let mut input = String::new();
-            if std::io::stdin().lock().read_line(&mut input)? == 0 {
-                return Ok(());
-            }
-            match input.trim() {
-                "q" | "" => return Ok(()),
-                "n" => None,
-                number => {
-                    let index = number
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|value| value.checked_sub(1))
-                        .filter(|index| *index < sessions.len())
-                        .ok_or("invalid agent selection")?;
-                    Some(sessions[index].id.clone())
-                }
-            }
-        };
-        match selected {
-            Some(id) => id,
-            None => {
+        // The picker restores terminal modes before launch or tmux attachment.
+        match picker::choose(&sessions, &checkout.root.path, plain)? {
+            picker::Choice::Cancel => return Ok(()),
+            picker::Choice::Attach(index) => sessions[index].id.clone(),
+            picker::Choice::Create(name) => {
                 let request_id = CreationId::try_from(crate::session_runtime::random_id()?)?;
                 let key: String = request_id.clone().into();
-                let environment = crate::session_environment::Environment::capture()?;
+                // Folder selection does not reinterpret relative/empty caller PATH.
+                let environment = crate::session_environment::Environment::capture()?
+                    .prepare(&directory)?
+                    .into_environment();
                 let result = control::sessions(
                     &handshake,
                     Operation::Create {
                         request_id,
                         observations: Box::new(checkout.clone()),
                         environment,
+                        name,
                     },
                 );
                 match result {
@@ -165,6 +156,6 @@ pub fn run(socket: &Path, retry: Option<&str>) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn run(_socket: &Path, _retry: Option<&str>) -> Result<()> {
+pub fn run(_socket: &Path, _retry: Option<&str>, _plain: bool) -> Result<()> {
     Err("local agent sessions require Unix".into())
 }
