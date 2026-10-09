@@ -93,3 +93,4 @@ ssh tnt 'sudo nixos-rebuild switch --rollback'
 ```
 
 The server includes Wumpa, Zsh, Starship, Git, mise, tmux, Node.js 24, and CLI utilities.
+The system-wide shell alias `a` runs `wumpa agent --socket /run/wumpa/control.sock`.
