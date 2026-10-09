@@ -1141,8 +1141,43 @@ mod unix {
             symlink(&path, &alias).unwrap();
             assert!(tmux_socket_metadata(&alias).is_err());
             drop(listener);
-            assert!(recover_stale_tmux_socket(&path).unwrap());
-            assert!(!path.exists());
+
+            // Bind without listening so forked test children cannot temporarily
+            // keep an active endpoint alive through an inherited descriptor.
+            let stale = dir.path().join("stale.sock");
+            // SAFETY: socket returns a new descriptor, immediately owned below.
+            let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(raw >= 0);
+            // SAFETY: raw is a newly allocated, uniquely owned descriptor.
+            let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+            // SAFETY: zero is a valid initial representation of sockaddr_un.
+            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            #[cfg(target_os = "macos")]
+            {
+                address.sun_len = std::mem::size_of_val(&address) as u8;
+            }
+            let bytes = stale.as_os_str().as_bytes();
+            assert!(bytes.len() < address.sun_path.len());
+            for (destination, source) in address.sun_path.iter_mut().zip(bytes) {
+                *destination = *source as libc::c_char;
+            }
+            // SAFETY: address is initialized and socket is a live descriptor.
+            assert_eq!(
+                unsafe {
+                    libc::bind(
+                        socket.as_raw_fd(),
+                        (&address as *const libc::sockaddr_un).cast(),
+                        std::mem::size_of_val(&address) as libc::socklen_t,
+                    )
+                },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+            fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(recover_stale_tmux_socket(&stale).unwrap());
+            assert!(!stale.exists());
         }
 
         #[test]
