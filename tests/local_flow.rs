@@ -152,8 +152,23 @@ fn legacy_server_migration_survives_restart_without_cloning() {
     drop(daemon);
     let _daemon = start(&path, port);
     assert_eq!(std::fs::read(&path).unwrap(), migrated);
-    // Config plus the control socket and persistent startup lock; no clone.
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    // Runtime discovery initializes asynchronously; only known daemon metadata
+    // may appear alongside the configuration/socket/lock, never a cloned folder.
+    let names = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert!((3..=5).contains(&names.len()));
+    assert!(names.iter().all(|name| matches!(
+        name.to_str(),
+        Some(
+            "server.json"
+                | "control.sock"
+                | "control.sock.lock"
+                | ".control.sock.sessions"
+                | ".control.sock.session-identity.json"
+        )
+    )));
 }
 
 #[test]
@@ -256,9 +271,19 @@ fn local_client_saves_connection_and_repository_across_restarts() {
     );
     assert!(output.contains("ssh://git@example.com/app.git"));
     let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-    assert_eq!(
-        entries.len(),
-        4,
-        "only two configs, the control socket, and its lock should exist; no clone"
+    assert!(
+        (4..=6).contains(&entries.len()),
+        "only configs and daemon runtime metadata may exist; no clone"
     );
+    assert!(entries.into_iter().all(|entry| matches!(
+        entry.unwrap().file_name().to_str(),
+        Some(
+            "server.json"
+                | "client.json"
+                | "control.sock"
+                | "control.sock.lock"
+                | ".control.sock.sessions"
+                | ".control.sock.session-identity.json"
+        )
+    )));
 }

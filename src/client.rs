@@ -94,11 +94,21 @@ fn show_repositories(response: &Response) {
     if response.repositories.is_empty() {
         println!("  No repositories yet.");
     }
+    if let Some(snapshot) = &response.sessions {
+        if let Some(error) = &snapshot.error {
+            crate::output::info("Agents unavailable", error);
+        } else if !snapshot.supported {
+            crate::output::hint("Agent execution/discovery is unsupported on this server.");
+        }
+    }
     for (index, entry) in response.repository_entries().iter().enumerate() {
         println!("  {}. {:?}", index + 1, entry.url);
         match &entry.checkout_path {
             Some(path) => crate::output::info("Cloned", path.display()),
             None => println!("     Saved — not cloned"),
+        }
+        if let Some(path) = &entry.checkout_path {
+            show_agents(response, path, "     ");
         }
         if let Some(group) = response
             .worktrees
@@ -108,7 +118,7 @@ fn show_repositories(response: &Response) {
             for worktree in &group.entries {
                 if Some(&worktree.path) != entry.checkout_path.as_ref() {
                     crate::output::info(
-                        "  Worktree",
+                        "  🌲 Worktree",
                         format_args!(
                             "{} [{}]{}",
                             worktree.path.display(),
@@ -120,10 +130,27 @@ fn show_repositories(response: &Response) {
                             if worktree.prunable { " [prunable]" } else { "" }
                         ),
                     );
+                    show_agents(response, &worktree.path, "       ");
                 }
             }
             if let Some(error) = &group.error {
                 crate::output::info("  Worktrees unavailable", error);
+            }
+        }
+    }
+}
+
+fn show_agents(response: &Response, checkout: &std::path::Path, indent: &str) {
+    if let Some(snapshot) = &response.sessions {
+        for agent in &snapshot.sessions {
+            if agent.checkout == checkout {
+                let id: String = agent.id.clone().into();
+                println!(
+                    "{indent}└ 🤖 {} · {} · {:?}",
+                    crate::output::clean(&agent.label),
+                    id,
+                    agent.state
+                );
             }
         }
     }

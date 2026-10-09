@@ -147,7 +147,12 @@ impl App {
                 );
             }
         } else {
-            let repos_title = format!(" Repositories  {} ", self.repositories.len());
+            let agent_warning = agent_discovery_warning(self.sessions.as_ref());
+            let repos_title = format!(
+                " Repositories  {}{} ",
+                self.repositories.len(),
+                agent_warning.unwrap_or("")
+            );
             let repos_block = workspace_panel(&repos_title);
             if self.repositories.is_empty() {
                 let message = if self.job.as_ref().is_some_and(|job| job.cloning) {
@@ -168,50 +173,76 @@ impl App {
                     rows[1],
                 );
             } else {
-                let checkout_rows = self.checkout_rows();
+                let checkout_rows = self.dashboard_rows();
                 let items: Vec<_> = checkout_rows
                     .iter()
                     .copied()
                     .enumerate()
-                    .map(|(row, (index, worktree))| {
+                    .map(|(row, (index, worktree, agent))| {
                         let repo = &self.repositories[index];
-                        let label = if let Some(worktree) = worktree {
-                            let name = display_path(&worktree.path, self.home_dir.as_deref());
-                            let connector = if checkout_rows
-                                .get(row + 1)
-                                .is_some_and(|(next, child)| *next == index && child.is_some())
-                            {
-                                "├"
-                            } else {
-                                "└"
-                            };
-                            format!(
-                                "   {connector} {}{}",
-                                clean(&name),
-                                worktree_label(worktree)
-                            )
-                        } else {
-                            let group = self.worktrees.iter().find(|group| group.url == repo.url);
-                            let main = group.and_then(|group| {
-                                group
-                                    .entries
-                                    .iter()
-                                    .find(|entry| Some(&entry.path) == repo.checkout_path.as_ref())
-                            });
-                            format!(
-                                " {}{}{}",
-                                repository_name(&repo.url),
-                                main.map(worktree_label).unwrap_or_default(),
-                                if group.is_some_and(|group| group.error.is_some()) {
-                                    " [worktrees unavailable — i]"
+                        let label =
+                            if let Some(agent) = agent {
+                                let next_sibling = checkout_rows.get(row + 1).is_some_and(
+                                    |(next, tree, child)| {
+                                        *next == index
+                                            && if worktree.is_some() {
+                                                child.is_some()
+                                                    && tree.map(|tree| &tree.path)
+                                                        == worktree.map(|tree| &tree.path)
+                                            } else {
+                                                true
+                                            }
+                                    },
+                                );
+                                let id: String = agent.id.clone().into();
+                                format!(
+                                    "{}{} 🤖 {} · {} · {:?}",
+                                    if worktree.is_some() { "     " } else { "   " },
+                                    if next_sibling { "├" } else { "└" },
+                                    clean(&agent.label),
+                                    id,
+                                    agent.state
+                                )
+                            } else if let Some(worktree) = worktree {
+                                let name = display_path(&worktree.path, self.home_dir.as_deref());
+                                let connector = if checkout_rows.iter().skip(row + 1).any(
+                                    |(next, child, agent)| {
+                                        *next == index && child.is_some() && agent.is_none()
+                                    },
+                                ) {
+                                    "├"
                                 } else {
-                                    ""
-                                }
-                            )
-                        };
+                                    "└"
+                                };
+                                format!(
+                                    "   {connector} 🌲 {}{}",
+                                    clean(&name),
+                                    worktree_label(worktree)
+                                )
+                            } else {
+                                let group =
+                                    self.worktrees.iter().find(|group| group.url == repo.url);
+                                let main = group.and_then(|group| {
+                                    group.entries.iter().find(|entry| {
+                                        Some(&entry.path) == repo.checkout_path.as_ref()
+                                    })
+                                });
+                                format!(
+                                    " {}{}{}",
+                                    repository_name(&repo.url),
+                                    main.map(worktree_label).unwrap_or_default(),
+                                    if group.is_some_and(|group| group.error.is_some()) {
+                                        " [worktrees unavailable — i]"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                            };
                         ListItem::new(Line::styled(
                             label,
-                            if worktree.is_some() {
+                            if agent.is_some() {
+                                Style::default().fg(STATUS)
+                            } else if worktree.is_some() {
                                 Style::default().fg(MUTED)
                             } else {
                                 Style::default().add_modifier(Modifier::BOLD)
@@ -377,6 +408,38 @@ impl App {
             Rect::new(body.x, popup.y + height - 2, body.width, 1),
         );
     }
+}
+
+fn agent_discovery_warning(
+    snapshot: Option<&crate::session_runtime::RemoteSnapshot>,
+) -> Option<&'static str> {
+    match snapshot {
+        None => Some(" · Agents require daemon upgrade"),
+        Some(snapshot) if snapshot.error.is_some() => Some(" · Agents unavailable"),
+        Some(snapshot) if !snapshot.supported => Some(" · Agents unsupported"),
+        Some(_) => None,
+    }
+}
+
+#[test]
+fn agent_discovery_states_are_distinct() {
+    use crate::session_runtime::RemoteSnapshot;
+    assert_eq!(
+        agent_discovery_warning(None),
+        Some(" · Agents require daemon upgrade")
+    );
+    let mut snapshot = RemoteSnapshot::default();
+    assert_eq!(
+        agent_discovery_warning(Some(&snapshot)),
+        Some(" · Agents unsupported")
+    );
+    snapshot.supported = true;
+    assert_eq!(agent_discovery_warning(Some(&snapshot)), None);
+    snapshot.error = Some("discovery failed".into());
+    assert_eq!(
+        agent_discovery_warning(Some(&snapshot)),
+        Some(" · Agents unavailable")
+    );
 }
 
 // Abbreviate only a known server home, at a complete path-component boundary.

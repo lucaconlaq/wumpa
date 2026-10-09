@@ -161,6 +161,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
         let config = config.clone();
         let cloning = cloning.clone();
         let path = path.clone();
+        let sessions = control.session_snapshot_reader();
         std::thread::Builder::new()
             .name("request".into())
             .spawn(move || {
@@ -202,6 +203,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                             .map(|repository| repository.url.clone())
                             .collect(),
                         error,
+                        sessions: None,
                         worktrees: Vec::new(),
                         preflight: preflight.then_some(crate::protocol::Preflight {
                             version: crate::protocol::HELPER_VERSION,
@@ -210,6 +212,23 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                     };
                     drop(config);
                     response.worktrees = crate::worktrees::discover(&response.checkouts);
+                    response.sessions = Some(sessions().remote());
+                    if let Some(snapshot) = response.sessions.as_mut() {
+                        for agent in &mut snapshot.sessions {
+                            if let Some(path) = response
+                                .checkouts
+                                .iter()
+                                .filter_map(|repository| repository.checkout_path.as_ref())
+                                .find(|path| {
+                                    path.canonicalize()
+                                        .is_ok_and(|canonical| canonical == agent.checkout)
+                                })
+                            {
+                                agent.checkout = path.clone();
+                            }
+                        }
+                        snapshot.limit();
+                    }
                     write_message(&response, &mut stream)
                 })();
                 if let Err(error) = result {

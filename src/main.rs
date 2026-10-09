@@ -13,6 +13,10 @@ mod output;
 mod protocol;
 mod repository;
 mod server;
+mod session_cli;
+mod session_environment;
+mod session_runtime;
+mod sessions;
 mod transport;
 mod tui;
 mod worktrees;
@@ -43,6 +47,23 @@ enum Commands {
         detach: bool,
         #[arg(long, hide = true, conflicts_with = "detach")]
         ready_file: Option<std::path::PathBuf>,
+    },
+    /// Create or attach a coding agent in the current registered checkout
+    Agent {
+        /// Absolute local control socket; no TCP/config fallback
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        /// Recover an uncertain creation without launching a duplicate (RUN:REQUEST)
+        #[arg(long)]
+        retry: Option<String>,
+    },
+    /// Internal persistent agent supervisor
+    #[command(hide = true)]
+    AgentRunner {
+        #[arg(long)]
+        channel: std::path::PathBuf,
+        #[arg(long)]
+        id: String,
     },
     /// Check SSH-agent handoff and a clone destination without cloning or saving
     CheckClone {
@@ -118,6 +139,8 @@ fn run() -> Result<()> {
                 server::serve(port, &socket, ready_file.as_deref())
             }
         }
+        Some(Commands::Agent { socket, retry }) => session_cli::run(&socket, retry.as_deref()),
+        Some(Commands::AgentRunner { channel, id }) => session_runtime::run_agent(&channel, &id),
         Some(Commands::CloneHelper) => helper::run(),
         Some(Commands::CheckClone {
             host,

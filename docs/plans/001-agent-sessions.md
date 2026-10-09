@@ -1,7 +1,98 @@
 # Checkout agent sessions
 
 ## Status
-Read-only checkout preflight implemented; awaiting review.
+Linux end-to-end implementation integrated. No deployment or release-pin change.
+Full cross-platform completion remains blocked on verified macOS descendant
+containment and runtime validation; macOS creation/discovery is explicitly
+unsupported rather than using an unsafe process-group-only fallback.
+
+| Step | Implementation status |
+| --- | --- |
+| 1. Unix control socket | Implemented, including safe internal runner socket cleanup. |
+| 2. Checkout preflight | Implemented; read-only observations alone remain non-durable. |
+| 3. Contracts/settings | Implemented local dispatch, durable non-secret outcomes, byte-safe environments, retry reconciliation, and deadlines. |
+| 4. tmux lifecycle | Implemented on Linux: dedicated server, pinned identities, subreaper supervision, exit/removal cleanup, and managed-removal callback. |
+| 5. Agent CLI | Implemented selection/new/cancel, direct attach/switch, nesting refusal, and explicit uncertain-creation retry keys. |
+| 6. Snapshots | Implemented optional remote-safe cached summaries, unsupported/error states, and bounded discovery. |
+| 7. Display | Implemented nested agents/worktrees in TUI/plain lists, stable agent selection, and checkout actions. |
+| 8. Validation | Linux automated tests, strict Clippy, formatting, Rust 1.85 validation, and Apple cross-compilation; macOS runtime remains unverified. |
+| 9. Docs/deployment | Usage/deployment configuration updated; NixOS module syntax checked, not deployed or service-runtime tested. |
+
+### Validation
+
+- Review findings in `issues.md` are addressed, including whole-session cleanup,
+  nonblocking unsafe-record rejection, fail-closed managed removal, fresh response
+  snapshots, pinned-root relative execution, and explicit dashboard discovery states.
+- `cargo +1.85.0 test --locked`: 150 tests pass, including 12 isolated Linux tmux
+  integration tests and managed-removal/runtime-identity unit tests.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+  `git diff --check` pass.
+- `cargo +1.85.0 check --locked --target aarch64-apple-darwin` passes without
+  warnings. This is cross-compilation only, not macOS runtime validation.
+- `nix-instantiate --parse tnt/nixos/server.nix` passes; no deployment performed.
+- `nix develop` is unavailable because this checkout has no `flake.nix`; validation
+  used installed Rust toolchains with the Nix GCC wrapper on PATH.
+
+### Historical pre-runtime slices
+
+The following records describe earlier slices, not the current implementation.
+
+- `src/session_environment.rs` adds standard padded Base64 name/value entries,
+  arbitrary Unix-byte preservation, secret-safe validation and redacted Debug,
+  256 KiB compact encoded payload and 4,096-variable limits, bookkeeping filtering,
+  and original-caller-directory PATH adjustment. Duplicate names are rejected.
+- Executable lookup uses only the adjusted caller PATH or an absolute configured
+  executable. Missing PATH never falls back to daemon settings. Relative configured
+  paths containing `/` fail closed until their base-directory policy is agreed.
+- A preparation helper builds fresh Commands from server-owned literal arguments,
+  clearing inherited environment without process-global mutation. The tmux backend
+  must still supply fresh terminal settings and implement safe per-agent delivery;
+  no tmux server environment is mutated by this slice.
+- Create operation types now require the bounded environment; retry, list, attach,
+  session metadata, and recovery records reject environment fields. Neither control
+  listener dispatches session operations yet; there is still no public agent CLI.
+- Linux formatting, strict Clippy, and all 127 tests pass with Rust 1.99 and
+  Nix-provided GCC/Git. `nix develop` is unavailable because this checkout has no
+  flake; Rust 1.85 and macOS runtime validation remain outstanding. Added `base64`
+  0.22.1 (declared MSRV 1.48) instead of implementing a custom codec.
+
+### Previous session contract slice
+
+Step 3 session model and retry contract implemented as internal types.
+
+- `src/sessions.rs` defines validated Wumpa session/creation IDs, checkout
+  associations independent of caller subdirectories, labels, live lifecycle states,
+  separate local tmux attachment details, local operation/result types, and typed
+  failures. These types are not dispatched by either listener.
+- Added current-run envelope validation and pure retry resolution: verified
+  retained/recovered records yield the original session ID or failure; missing
+  evidence returns `outcome_unknown`, never permission to launch.
+- Retry/recovery policy agreed below. This is a contract slice, not a running
+  deduplication store or restart recovery implementation. Create metadata is not a
+  complete wire request until the environment payload contract is agreed.
+- Linux formatting, strict Clippy, and all 118 tests pass with Rust 1.99 and
+  Nix-provided GCC/Git. No flake is available for `nix develop`; Rust 1.85 and macOS
+  runtime validation remain outstanding.
+- Still pending in step 3: bounded launch environment and PATH rules, actual local
+  dispatch/ownership revalidation, and retry record storage/reconciliation.
+  Durable checkout lifecycle identity remains a prerequisite for launching.
+
+### Previous configuration slice
+
+- Added validated `agent_command` argument arrays, defaulting to `["pi"]` for
+  missing/legacy configurations. Empty arrays/executables, non-string arguments,
+  and NUL bytes are rejected; literal arguments and empty non-executable arguments
+  round-trip without shell interpretation.
+- No session operations, launch, environment delivery, tmux, or public agent CLI
+  added. The remainder of step 3 is pending, including retry retention/recovery
+  contracts and the open lifecycle/environment decisions below.
+- Read-only checkout preflight is implemented; its review gate remains applicable.
+- Configuration-slice Linux validation: formatting, strict Clippy, and all 112
+  tests pass using installed Rust 1.99 and Nix-provided GCC/Git. `nix develop`
+  remains unavailable because this checkout has no flake; Rust 1.85 and macOS
+  runtime validation remain outstanding.
+
+### Previous preflight slice
 
 - Preflight uses the daemon's live in-memory registration snapshot, bounded isolated
   Git discovery, and mandatory matching canonical paths/device/inode observations
@@ -133,30 +224,161 @@ attach to them in this scope.
   Never remove an active endpoint, symlink, or ordinary file; a timeout does not
   establish staleness. Normal shutdown removes only the daemon's own socket.
 
-## Open decisions
-Resolve each before its dependent slice; do not silently choose during implementation.
+## Agreed session/retry contract
 
-- Before lifecycle: durable identity checks that distinguish confirmed
-  removal/replacement/moves from access failures. Preflight comparison fields and
-  unavailable-check policy are agreed: canonical paths plus device/inode for caller
-  directory, root, Git directory, and common directory; all observations mandatory.
-  These observations alone are not durable identities.
-- Before launch: stable per-instance tmux socket/ownership rules derived from the
-  control socket path; retry recovery and service restart lifecycle.
-- Before launch: environment encoding/size limits, exact bookkeeping-variable filter,
-  and per-process delivery without global environment mutation or secret logging.
-  Define handling of relative PATH entries when launch changes to the checkout root.
-- Before cleanup: reconciliation cadence when no dashboard is connected, reliable
-  ownership/tracking of agent child processes, and bounded verification of immediate
-  force-stop completion.
-  Checkout deletion commands are not introduced merely to implement this feature;
-  any Wumpa deletion path must honor stop-before-remove when provided.
+- Session IDs are daemon-generated; creation request IDs are caller-generated.
+  Both use opaque 128-bit IDs encoded as 32 lowercase hexadecimal characters.
+  ID generation and backend collision checking belong to the launch implementation.
+- Local list/create/attach requests require the current run ID, checked before any
+  backend action. Each operation carries mandatory checkout observations; daemon
+  registration/membership and owned-session association must be revalidated.
+  Session checkout association excludes the caller subdirectory and agent cwd.
+- Session metadata and local attachment details are distinct. Labels are selected
+  by the daemon for display, not accepted as commands. Starting/running/stopping
+  and cleanup-failed states describe live or incompletely cleaned-up sessions;
+  successful agent exit removes the session, without retaining terminal output.
+- Reserve a creation key scoped to the canonical instance and originating daemon
+  run before any launch side effect. Serialize concurrent attempts on that key;
+  duplicates return the original outcome or creation-in-progress, never launch.
+  Reject reuse for a different checkout. Command/environment changes must not
+  affect an already accepted attempt.
+- Retain accepted outcomes for the originating daemon run, even when the session
+  exits. Never evict a record and then treat its key as new in that run. Storage
+  capacity and rejection-before-reservation limits must be set before launch.
+- Following a lost response, explicitly retry with the same key. A restarted
+  daemon requires a new handshake and preflight; retry carries the original run ID
+  as well as the expected current run ID. Retry is lookup/reconciliation only,
+  never a new creation request. Do not automatically retry state-changing requests.
+- Reconcile verified owned backend sessions before resolving an attempt after
+  restart. Retained/recovered evidence returns the original ID or failure; a
+  missing session/record does not prove no launch occurred. Missing, conflicting,
+  incomplete, or unavailable evidence fails explicitly without a duplicate launch.
+  Returning a previously created ID does not promise it is still attachable:
+  attachment separately revalidates ownership, checkout, and running state.
+- Recovery records contain only instance/run/request/session identities, checkout
+  association, and typed outcome. No launch environment, terminal output, or
+  secret-bearing error text is retained. Backend discovery remains authoritative
+  for live processes; outcome records are not a parallel process registry.
+- Durable checkout identity, concrete backend recovery/storage sequencing, local
+  operation deadlines, and environment delivery remain prerequisites to dispatch
+  and launch; existing observations alone must not establish confirmed removal.
 
-## Current review slice
-Read-only checkout preflight, implementation step 2. Review the mandatory observation
-policy, registration/membership validation, run-ID binding, and isolated Git queries.
-Stop for review before proceeding. The following criteria describe the previous
-Unix control socket/handshake slice, retained for reference.
+## Agreed launch environment policy
+
+- Preserve arbitrary Unix bytes in environment names and values using an array
+  of objects with standard padded Base64 `name` and `value` strings. Do not require
+  UTF-8 or use lossy conversion. Base64 is encoding, not encryption; these entries
+  belong only to local create requests. Reject duplicate decoded names.
+- Reject NUL bytes, empty names, and names containing `=` without echoing entry
+  contents. Values may contain `=` or be empty.
+- Limit the compact canonical encoded environment JSON array to 256 KiB
+  (262,144 bytes), including Base64, entry fields, commas, and brackets, within
+  the existing 1 MiB complete-message limit. JSON whitespace does not count toward
+  the canonical environment budget but still counts toward the complete message.
+  Recheck the environment budget after PATH adjustment. Reject oversized payloads without
+  truncation or entry contents in errors. OS process-launch limits still apply.
+- Allow at most 4,096 environment variables, alongside the encoded-size limit.
+  Reject excess entries without exposing names or values.
+- Filter caller bookkeeping variables: `TMUX`, `TMUX_PANE`, `STY`, `WINDOW`,
+  `PWD`, `OLDPWD`, `SHLVL`, `_`, `LINES`, `COLUMNS`, `SSH_TTY`, `TERM`, and
+  `TERMCAP`. The backend supplies fresh terminal settings and checkout `PWD`.
+  Preserve caller PATH, credentials, `SSH_AUTH_SOCK`, and other variables unless
+  another agreed rule applies; do not broadly remove SSH or credential variables.
+- Resolve relative PATH entries against the CLI's original validated working
+  directory before changing to the checkout root. Empty PATH entries mean that
+  original directory too. Use this adjusted PATH for configured-executable lookup
+  and the new agent environment, preserving caller lookup semantics.
+- If caller PATH is absent, reject a configured bare executable such as `pi`
+  with a clear, secret-safe failure. Absolute executable paths still work. Never
+  fall back to the daemon's PATH. An explicitly empty PATH follows the empty-entry
+  rule above rather than being treated as absent.
+- A fresh process Command can receive a cleared, filtered per-process environment
+  plus checkout PWD without changing the daemon's global environment. Delivery
+  uses a private one-shot Unix channel, not tmux global state. Never log a prepared
+  Command: its Debug
+  includes environment contents. Environments must never enter logs, recovery
+  records, or snapshots.
+- If relative/empty PATH entries require prefixing a caller directory containing
+  `:`, fail closed: Unix PATH cannot encode that directory without changing lookup
+  semantics. Do not silently split it into unrelated search directories.
+
+## Implementation decisions (delegated by user)
+
+- Durable live identity: a persistent per-agent supervisor opens/pins checkout,
+  Git/common, and runtime directory descriptors before spawn. Require local
+  ext2/3/4, XFS, Btrfs, tmpfs, or OverlayFS directory identities; NFS/FUSE/9p and
+  unknown filesystems fail closed before reservation because their server-side
+  inode reuse is not prevented by local FDs. Supported directory identities cannot
+  be reused while their objects remain pinned. Restart recovery verifies live owned
+  tmux membership, a strict non-secret record, and the supervisor's matching pinned
+  association; stale disk observations alone never authorize reassociation.
+- Confirm removal on successful path-object mismatch or ENOENT at an original
+  location; permission/discovery failures remain unknown. Successful isolated Git
+  queries additionally catch metadata reassociation. Execute with `fchdir` on the
+  pinned root, never accidentally in a replacement directory.
+- Linux containment uses a dedicated foreground agent group plus a persistent
+  `PR_SET_CHILD_SUBREAPER` supervisor. Immediately SIGKILL owned direct children,
+  then repeatedly kill/reap newly adopted descendants, including detached children.
+  SIGCHLD is defaulted; the sole supervisor thread signals its captured children
+  before reaping, so those PIDs cannot be reused during signalling. Never signal
+  potentially stale queried group IDs. Two seconds bounds verification; failed
+  cleanup remains supervised. Exit/hangup/termination use the same cleanup path.
+  Deliberate SIGKILL/interference by the owning OS user is outside sandbox claims.
+- Stable tmux/runtime names derive from the full canonical control endpoint via an
+  adjacent `.<endpoint>.sessions` directory. A private adjacent runtime-identity
+  marker and pinned descriptor detect replacement/movement. Validate ownership,
+  modes, instance tag, strict session ID/name, and recovery tag; never use the
+  personal tmux server or configuration. Require tmux >= 3.2 for direct argument
+  vectors, and accessible procfs; too-long derived socket paths fail explicitly.
+- Creation reserves a synced atomic record (including parent-directory fsync)
+  before launch, tags the owned backend before delivering an environment, and
+  records readiness only after runner acknowledgement. Lost/incomplete outcomes
+  reconcile against the owned runner; missing evidence is unknown, not another
+  launch. Capacity is 4,096 records and 64 live sessions per instance: reject before
+  launch; never automatically evict/forget an accepted key. Administrative archival
+  of old-run outcomes requires daemon shutdown and confirmed agent termination;
+  missing archived retries stay unknown.
+- Secrets travel over a private, same-user one-shot Unix launch channel, never
+  argv, disk, tmux global environment, or remote metadata. Runner builds a fresh
+  cleared Command and supplies freshly allocated pane bookkeeping. Configured
+  relative executable paths containing `/` use the validated checkout root;
+  relative/empty caller PATH entries still use the original caller directory.
+- Session control has a 20-second overall exchange budget; reads initially share
+  the existing five-second framing budget. Runner IPC is at most three seconds
+  within the caller's remaining budget. Cached refresh is about 500 ms with a
+  two-second budget; supervisors independently poll paths every 100 ms and perform
+  bounded Git checks about once per second. Remote summaries have a 128 KiB budget
+  and exclude local instance/attachment and environment details.
+- Managed deletion integration is `Manager::with_checkout_removal`: hold the same
+  instance mutex through stop/verification and replacement-safe removal callback.
+  Unverified termination aborts removal. No current checkout deletion command
+  exists to wire; none was introduced for this feature. Other instances reconcile
+  independently.
+- Service policy preserves dedicated tmux/supervisors across daemon restart/stop
+  (`KillMode=process`, persistent private runtime directory). NixOS configuration
+  was syntax-checked only; deployment and the pinned binary release are unchanged.
+
+### Remaining completion gates
+
+- macOS needs verified descendant containment and runtime tests before enabling
+  execution. Unix socket/control and repository browsing remain supported;
+  snapshots explicitly report unsupported agent execution there.
+- Actual NixOS service restart/stop verification and a feature-capable release need
+  a separately authorized deployment/release task.
+- Real-agent interactive acceptance is not automated: tests deliberately use
+  harmless isolated commands, not Pi or developer sessions.
+
+## Implementation review scope
+Review the integrated Linux path in `src/session_runtime.rs`, `src/session_cli.rs`,
+`src/control.rs`, environment/contracts, remote snapshots, and display. Tests use
+private tmux sockets and harmless commands, never real Pi or developer sessions.
+Focus on restart recovery, pinned-object identity, descendant cleanup/confirmation,
+secret boundaries, and fail-closed unknown outcomes. The user delegated remaining
+implementation choices; historical per-slice review stops no longer gate this
+integration.
+
+### Previous socket/handshake review criteria
+The following criteria are retained for reference.
 
 - Follow the agreed Unix socket policy, protocol limits, and daemon-run ID binding.
   Implement race-safe lock, socket identity-check, and cleanup mechanics.

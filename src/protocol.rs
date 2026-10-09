@@ -73,6 +73,9 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktrees: Vec<crate::worktrees::RepositoryWorktrees>,
     pub error: Option<String>,
+    /// Remote-safe agent metadata; absent means an older daemon lacks discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<crate::session_runtime::RemoteSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight: Option<Preflight>,
 }

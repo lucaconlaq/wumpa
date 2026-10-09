@@ -7,6 +7,7 @@ publish = false
 description = "Manage remote coding worktrees and sessions"
 
 [dependencies]
+base64 = "0.22"
 clap = { features = ["derive"], version = "4" }
 crossterm = "0.28"
 ratatui = "0.29"

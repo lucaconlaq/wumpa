@@ -73,6 +73,7 @@ case "$previous" in
     (while :; do printf x >> "$TEST_ROOT/heartbeat"; sleep 0.05; done) &
     echo ready > "$TEST_ROOT/running"
     wait;;
+  *cache.git) echo ready > "$TEST_ROOT/running"; while [ ! -f "$TEST_ROOT/release" ]; do sleep 0.05; done;;
   *fail.git) printf '\033[31mdenied' >&2; exit 1;;
   *race.git) mkdir "$TEST_ROOT/repos/race"; echo keep > "$TEST_ROOT/repos/race/keep";;
 esac
@@ -175,6 +176,45 @@ fn response(stream: TcpStream) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn delayed_tcp_request_uses_latest_session_cache() {
+    let fixture = Fixture::new(true);
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, fixture.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // Start framing so the request worker has already accepted this connection.
+    stream.write_all(b"{\"action\":").unwrap();
+    thread::sleep(Duration::from_millis(100));
+    fs::rename(
+        fixture.dir.path().join(".control.sock.sessions"),
+        fixture.dir.path().join("old-runtime"),
+    )
+    .unwrap();
+    wait(|| fixture.request(json!({"action":"list"}))["sessions"]["error"].is_string());
+    stream.write_all(b"\"list\"}\n").unwrap();
+    assert!(response(stream)["sessions"]["error"].is_string());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn completed_clone_uses_latest_session_cache() {
+    let fixture = Fixture::new(true);
+    let stream = fixture.send(fixture.clone_request("cache"));
+    wait(|| fixture.dir.path().join("running").exists());
+    fs::rename(
+        fixture.dir.path().join(".control.sock.sessions"),
+        fixture.dir.path().join("old-runtime"),
+    )
+    .unwrap();
+    wait(|| fixture.request(json!({"action":"list"}))["sessions"]["error"].is_string());
+    fs::write(fixture.dir.path().join("release"), "go").unwrap();
+    let result = response(stream);
+    assert!(result["error"].is_null(), "{result}");
+    assert!(result["sessions"]["error"].is_string(), "{result}");
+}
+
 #[test]
 fn saved_entry_clone_persists_across_restart_and_agents_are_scoped() {
     let mut fixture = Fixture::new(true);
@@ -201,11 +241,11 @@ fn saved_entry_clone_persists_across_restart_and_agents_are_scoped() {
     assert!(environment.contains("IdentityAgent=SSH_AUTH_SOCK"));
     let args = fs::read_to_string(root.join("args")).unwrap();
     assert!(args.contains("--no-recurse-submodules\n--template=\n--\nssh://host/second.git\n"));
-    assert!(
-        !fs::read_to_string(root.join("server.json"))
-            .unwrap()
-            .contains("agent")
-    );
+    let saved = fs::read_to_string(root.join("server.json")).unwrap();
+    let config: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(config["agent_command"], json!(["pi"]));
+    assert!(config.get("agent_socket").is_none());
+    assert!(!saved.contains(second_socket.to_str().unwrap()));
     assert!(
         fixture.request(fixture.clone_request("saved"))["error"]
             .as_str()

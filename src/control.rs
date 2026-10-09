@@ -1,4 +1,5 @@
-//! Local-only read-only control operations; configuration is supplied in memory.
+//! Local-only read-only preflight and state-changing session control.
+//! Configuration is supplied in memory.
 
 use std::path::Path;
 
@@ -16,8 +17,12 @@ pub fn validate_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use unix::{Exchange, cleanup_socket, verify_peer};
 #[cfg(unix)]
-pub use unix::Listener;
+pub use unix::{Listener, handshake, preflight, sessions};
+#[cfg(unix)]
+pub(crate) use unix::{local_request, recover_stale_socket};
 
 #[cfg(not(unix))]
 pub struct Listener;
@@ -34,6 +39,12 @@ impl Listener {
 
     pub fn check(&mut self) -> Result<()> {
         Err("Unix control sockets require Linux or macOS".into())
+    }
+
+    pub fn session_snapshot_reader(
+        &self,
+    ) -> impl Fn() -> crate::session_runtime::Snapshot + Send + 'static {
+        crate::session_runtime::Snapshot::default
     }
 }
 
@@ -84,6 +95,9 @@ mod unix {
     enum Request {
         Handshake {
             version: u32,
+        },
+        Sessions {
+            request: Box<crate::sessions::LocalRequest>,
         },
         Preflight {
             version: u32,
@@ -384,6 +398,7 @@ mod unix {
         Ok(Duration::from_millis(50))
     }
 
+    #[cfg(test)]
     fn wait_for_connection(
         mut accept: impl FnMut() -> io::Result<UnixStream>,
         stopping: &AtomicBool,
@@ -555,9 +570,9 @@ mod unix {
         Ok(())
     }
 
-    struct Exchange<'a> {
-        stream: &'a mut UnixStream,
-        deadline: Instant,
+    pub(crate) struct Exchange<'a> {
+        pub(crate) stream: &'a mut UnixStream,
+        pub(crate) deadline: Instant,
     }
 
     impl Exchange<'_> {
@@ -592,6 +607,82 @@ mod unix {
         }
     }
 
+    /// Same-user verification for internal runner channels, independent of framing.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_peer(stream: &UnixStream) -> Result<()> {
+        peer(stream)
+    }
+
+    /// Use the endpoint's replacement-safe cleanup for internal sockets too.
+    pub(crate) fn cleanup_socket(path: &Path, identity: &Metadata) -> Result<()> {
+        let parent = path.parent().ok_or("socket has no parent")?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(parent)?;
+        owned_mode(&directory.metadata()?, user(), 0o700)?;
+        remove_socket(&directory, path, identity, || {})
+    }
+
+    /// Recover only refused, unchanged, owned sockets; never active endpoints.
+    pub(crate) fn recover_stale_socket(path: &Path) -> Result<bool> {
+        let identity = socket_metadata(path)?;
+        match connect(path, CONNECT_TIMEOUT) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                if !same_identity(&identity, &socket_metadata(path)?) {
+                    return Err("internal socket changed during stale check".into());
+                }
+                cleanup_socket(path, &identity)?;
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Bounded same-user internal client, with no TCP/config fallback.
+    pub(crate) fn local_request<T: Serialize, R: serde::de::DeserializeOwned>(
+        path: &Path,
+        request: &T,
+        timeout: Duration,
+    ) -> Result<R> {
+        let deadline = Instant::now() + timeout;
+        let path = canonical_path(path)?;
+        let before = socket_metadata(&path)?;
+        let mut stream = connect(
+            &path,
+            CONNECT_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+        )?;
+        peer(&stream)?;
+        if !same_identity(&before, &socket_metadata(&path)?) {
+            return Err("internal endpoint changed during connection".into());
+        }
+        let mut exchange = Exchange {
+            stream: &mut stream,
+            deadline,
+        };
+        protocol::write_message(request, &mut exchange)?;
+        protocol::read_message(&mut exchange)
+    }
+
+    /// Local session operations carry the expected current daemon-run ID.
+    pub fn sessions(
+        handshake: &Handshake,
+        operation: crate::sessions::Operation,
+    ) -> Result<crate::sessions::LocalResponse> {
+        local_request(
+            &handshake.socket,
+            &Request::Sessions {
+                request: Box::new(crate::sessions::LocalRequest {
+                    version: VERSION,
+                    run_id: handshake.run_id.clone(),
+                    operation,
+                }),
+            },
+            crate::session_runtime::OPERATION_TIMEOUT,
+        )
+    }
+
     /// Internal client helper; no TCP fallback or configuration access.
     #[allow(dead_code)]
     pub fn handshake(path: &Path) -> Result<Handshake> {
@@ -624,6 +715,7 @@ mod unix {
         stream: &mut UnixStream,
         handshake: &Handshake,
         config: &Mutex<crate::config::ServerConfig>,
+        manager: &Mutex<Option<crate::session_runtime::Manager>>,
         deadline: Instant,
     ) -> Result<()> {
         stream.set_nonblocking(false)?;
@@ -635,6 +727,36 @@ mod unix {
                     return Err("incompatible control version".into());
                 }
                 protocol::write_message(handshake, &mut exchange)
+            }
+            Request::Sessions { request } => {
+                // Reject run mismatches before initializing runtime or Git discovery.
+                let result = request.validate_run(&handshake.run_id);
+                exchange.deadline = deadline + Duration::from_secs(15);
+                let response = match result {
+                    Err(failure) => crate::sessions::LocalResponse::Failed { failure },
+                    Ok(()) => {
+                        let config = config
+                            .lock()
+                            .map_err(|_| "configuration lock poisoned")?
+                            .clone();
+                        let mut manager = manager.lock().map_err(|_| "session lock poisoned")?;
+                        if manager.is_none() {
+                            *manager = crate::session_runtime::Manager::new(&handshake.socket).ok();
+                        }
+                        match manager.as_mut() {
+                            Some(manager) => manager.dispatch(
+                                *request,
+                                &handshake.run_id,
+                                &config,
+                                exchange.deadline,
+                            ),
+                            None => crate::sessions::LocalResponse::Failed {
+                                failure: crate::sessions::Failure::BackendUnavailable,
+                            },
+                        }
+                    }
+                };
+                protocol::write_message(&response, &mut exchange)
             }
             Request::Preflight {
                 version,
@@ -678,6 +800,8 @@ mod unix {
         directory: File,
         stop: Arc<AtomicBool>,
         worker: Option<JoinHandle<io::Result<()>>>,
+        manager: Arc<Mutex<Option<crate::session_runtime::Manager>>>,
+        snapshot: Arc<Mutex<crate::session_runtime::Snapshot>>,
     }
 
     impl Listener {
@@ -732,6 +856,11 @@ mod unix {
                 directory,
                 stop,
                 worker: None,
+                manager: Arc::new(Mutex::new(None)),
+                snapshot: Arc::new(Mutex::new(crate::session_runtime::Snapshot {
+                    supported: cfg!(target_os = "linux"),
+                    ..Default::default()
+                })),
             };
             fs::set_permissions(&owned.path, fs::Permissions::from_mode(0o600))?;
             socket_metadata(&owned.path)?;
@@ -742,18 +871,41 @@ mod unix {
                 run_id: random_id()?,
             });
             let stopping = owned.stop.clone();
+            let manager = owned.manager.clone();
+            let snapshot = owned.snapshot.clone();
             owned.worker = Some(
                 thread::Builder::new()
                     .name("control-listener".into())
                     .spawn(move || {
                         let active = Arc::new(AtomicUsize::new(0));
+                        let mut next_refresh = Instant::now();
+                        let mut failing_since = None;
                         while !stopping.load(Ordering::Relaxed) {
-                            match wait_for_connection(
-                                || listener.accept().map(|(stream, _)| stream),
-                                &stopping,
-                                Duration::from_secs(10),
-                            )? {
-                                Some(mut stream) => {
+                            if Instant::now() >= next_refresh {
+                                if let Ok(mut state) = manager.try_lock() {
+                                    // Restart discovery does not require a dashboard or a new launch.
+                                    if state.is_none() {
+                                        *state = crate::session_runtime::Manager::new(&response.socket).ok();
+                                        if state.is_none() {
+                                            if let Ok(mut current) = snapshot.lock() {
+                                                *current = crate::session_runtime::Snapshot { sessions: Vec::new(), supported: false,
+                                                    error: Some("Agent runtime ownership/storage unavailable".into()) };
+                                            }
+                                        }
+                                    }
+                                    if let Some(state) = state.as_mut() {
+                                        let value =
+                                            state.snapshot(Instant::now() + Duration::from_secs(2));
+                                        if let Ok(mut current) = snapshot.lock() {
+                                            *current = value;
+                                        }
+                                    }
+                                }
+                                next_refresh = Instant::now() + Duration::from_millis(500);
+                            }
+                            match listener.accept() {
+                                Ok((mut stream, _)) => {
+                                    failing_since = None;
                                     if active.load(Ordering::Relaxed) >= 32 {
                                         continue;
                                     }
@@ -761,6 +913,7 @@ mod unix {
                                     let count = active.clone();
                                     let response = response.clone();
                                     let config = config.clone();
+                                    let manager = manager.clone();
                                     let result = thread::Builder::new()
                                         .name("control-handshake".into())
                                         .spawn(move || {
@@ -769,6 +922,7 @@ mod unix {
                                                 &mut stream,
                                                 &response,
                                                 &config,
+                                                &manager,
                                                 deadline,
                                             );
                                             count.fetch_sub(1, Ordering::Relaxed);
@@ -780,13 +934,37 @@ mod unix {
                                         ));
                                     }
                                 }
-                                None => break,
+                                Err(error) => {
+                                    thread::sleep(accept_backoff(
+                                        error,
+                                        &mut failing_since,
+                                        Duration::from_secs(10),
+                                    )?);
+                                }
                             }
                         }
                         Ok(())
                     })?,
             );
             Ok(owned)
+        }
+
+        /// Read the current cache when called, not when a request is accepted.
+        /// Reconciliation runs independently of dashboard requests.
+        pub fn session_snapshot_reader(
+            &self,
+        ) -> impl Fn() -> crate::session_runtime::Snapshot + Send + 'static {
+            let snapshot = self.snapshot.clone();
+            move || {
+                snapshot
+                    .lock()
+                    .map(|snapshot| snapshot.clone())
+                    .unwrap_or_else(|_| crate::session_runtime::Snapshot {
+                        supported: cfg!(target_os = "linux"),
+                        error: Some("Agent snapshot lock unavailable".into()),
+                        sessions: Vec::new(),
+                    })
+            }
         }
 
         /// Propagate listener failure so the daemon cannot silently lose control.

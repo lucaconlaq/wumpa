@@ -128,6 +128,7 @@ struct App {
     repos: ListState,
     repositories: Vec<Repository>,
     worktrees: Vec<crate::worktrees::RepositoryWorktrees>,
+    sessions: Option<crate::session_runtime::RemoteSnapshot>,
     repository_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     connected: Option<usize>,
@@ -157,6 +158,7 @@ impl App {
             repos: ListState::default(),
             repositories: vec![],
             worktrees: vec![],
+            sessions: None,
             repository_dir: None,
             home_dir: None,
             connected: None,
@@ -189,6 +191,7 @@ impl App {
             self.connected = None;
             self.repositories.clear();
             self.worktrees.clear();
+            self.sessions = None;
             self.repository_dir = None;
             self.home_dir = None;
             self.repos.select(None);
@@ -270,23 +273,26 @@ impl App {
                 self.connected = Some(target);
                 self.workspace = Some(target);
                 self.details = false;
+                let previous_agent = self.selected_agent().map(|agent| agent.id.clone());
                 let previous = self.selected_checkout().map(|(repo, worktree)| {
                     (repo.url.clone(), worktree.map(|entry| entry.path.clone()))
                 });
                 self.repositories = response.repository_entries();
                 self.worktrees = response.worktrees;
+                self.sessions = response.sessions;
                 self.repository_dir = response.repository_dir;
                 self.home_dir = response.home_dir;
                 let selected = if self.repositories.is_empty() {
                     None
                 } else {
                     Some(
-                        self.checkout_rows()
+                        self.dashboard_rows()
                             .iter()
-                            .position(|(index, worktree)| {
+                            .position(|(index, worktree, agent)| {
                                 previous.as_ref().is_some_and(|(url, path)| {
                                     self.repositories[*index].url == *url
                                         && worktree.map(|entry| &entry.path) == path.as_ref()
+                                        && agent.map(|agent| &agent.id) == previous_agent.as_ref()
                                 })
                             })
                             .unwrap_or(0),
@@ -335,7 +341,7 @@ impl App {
         let (state, len) = match self.pane {
             Pane::Servers => (&mut self.servers, self.config.servers.len()),
             Pane::Repositories => {
-                let count = self.checkout_rows().len();
+                let count = self.dashboard_rows().len();
                 (&mut self.repos, count)
             }
         };
@@ -393,6 +399,7 @@ impl App {
             Some(active) if active == index => {
                 self.repositories.clear();
                 self.worktrees.clear();
+                self.sessions = None;
                 self.repository_dir = None;
                 self.home_dir = None;
                 self.repos.select(None);
@@ -432,9 +439,39 @@ impl App {
         rows
     }
 
+    fn dashboard_rows(
+        &self,
+    ) -> Vec<(
+        usize,
+        Option<&crate::worktrees::Worktree>,
+        Option<&crate::session_runtime::Summary>,
+    )> {
+        let mut rows = Vec::new();
+        for (index, worktree) in self.checkout_rows() {
+            rows.push((index, worktree, None));
+            let path = worktree
+                .map(|entry| &entry.path)
+                .or(self.repositories[index].checkout_path.as_ref());
+            if let Some(snapshot) = &self.sessions {
+                for agent in &snapshot.sessions {
+                    if Some(&agent.checkout) == path {
+                        rows.push((index, worktree, Some(agent)));
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    fn selected_agent(&self) -> Option<&crate::session_runtime::Summary> {
+        self.dashboard_rows()
+            .get(self.repos.selected()?)
+            .and_then(|(_, _, agent)| *agent)
+    }
+
     fn selected_checkout(&self) -> Option<(&Repository, Option<&crate::worktrees::Worktree>)> {
-        let rows = self.checkout_rows();
-        let (index, worktree) = *rows.get(self.repos.selected()?)?;
+        let rows = self.dashboard_rows();
+        let (index, worktree, _) = *rows.get(self.repos.selected()?)?;
         Some((&self.repositories[index], worktree))
     }
 
@@ -1067,7 +1104,8 @@ mod tests {
         assert_eq!(app.zed_target().unwrap(), "ssh://dev-host/repo");
         let text = screen(&mut app, 100, 30);
         assert!(text.contains("app [main]"));
-        assert!(text.contains("└ /external/feature work [feature]"));
+        assert!(text.contains("└ 🌲"));
+        assert!(text.contains("/external/feature work [feature]"));
         app.key(key(KeyCode::Down));
         assert_eq!(
             app.zed_target().unwrap(),
@@ -1085,6 +1123,64 @@ mod tests {
         );
         app.worktrees[0].error = Some("Git discovery failed".into());
         assert!(screen(&mut app, 100, 30).contains("worktrees unavailable"));
+    }
+
+    #[test]
+    fn agents_render_under_checkouts_and_keep_selection_identity_and_actions() {
+        use crate::{
+            session_runtime::{RemoteSnapshot, Summary},
+            sessions::{SessionId, State},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = removal_app(dir.path().join("client.json"));
+        app.config.servers[1].connection = Connection::Ssh {
+            host: "dev-host".into(),
+            port: 7432,
+        };
+        app.pane = Pane::Repositories;
+        app.repositories = vec![Repository {
+            url: "ssh://host/app.git".into(),
+            checkout_path: Some("/repo".into()),
+        }];
+        let first = Summary {
+            id: SessionId::try_from("a".repeat(32)).unwrap(),
+            checkout: "/repo".into(),
+            label: "pi".into(),
+            state: State::Running,
+        };
+        let second = Summary {
+            id: SessionId::try_from("b".repeat(32)).unwrap(),
+            ..first.clone()
+        };
+        app.sessions = Some(RemoteSnapshot {
+            sessions: vec![first.clone()],
+            supported: true,
+            error: None,
+        });
+        app.repos.select(Some(1));
+        assert_eq!(app.zed_target().unwrap(), "ssh://dev-host/repo");
+        assert!(screen(&mut app, 100, 30).contains("🤖"));
+        assert_eq!(app.selected_agent().unwrap().id, first.id);
+        let repositories = app.repositories.clone();
+        complete_job(
+            &mut app,
+            1,
+            Ok(Response {
+                repositories: repositories.iter().map(|entry| entry.url.clone()).collect(),
+                checkouts: repositories,
+                sessions: Some(RemoteSnapshot {
+                    sessions: vec![second, first.clone()],
+                    supported: true,
+                    error: None,
+                }),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(app.repos.selected(), Some(2));
+        assert_eq!(app.selected_agent().unwrap().id, first.id);
+        assert_eq!(app.zed_target().unwrap(), "ssh://dev-host/repo");
+        app.sessions.as_mut().unwrap().error = Some("discovery timed out".into());
+        assert!(screen(&mut app, 100, 30).contains("Agents unavailable"));
     }
 
     #[test]

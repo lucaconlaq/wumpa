@@ -87,9 +87,54 @@ pub struct Repository {
     pub checkout_path: Option<PathBuf>,
 }
 
-/// Server-owned storage settings and repository metadata.
+/// Server-selected executable and literal arguments, never a shell command string.
+/// Empty arguments are valid; empty executables and NUL bytes are not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct AgentCommand(Vec<String>);
+
+impl AgentCommand {
+    /// Validated executable followed by literal arguments; never a shell string.
+    pub fn arguments(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl Default for AgentCommand {
+    fn default() -> Self {
+        Self(vec!["pi".into()])
+    }
+}
+
+impl TryFrom<Vec<String>> for AgentCommand {
+    type Error = &'static str;
+
+    fn try_from(arguments: Vec<String>) -> std::result::Result<Self, Self::Error> {
+        if arguments
+            .first()
+            .is_none_or(|executable| executable.is_empty())
+        {
+            return Err("agent_command must contain a nonempty executable");
+        }
+        if arguments.iter().any(|argument| argument.contains('\0')) {
+            return Err("agent_command arguments must not contain NUL bytes");
+        }
+        Ok(Self(arguments))
+    }
+}
+
+impl From<AgentCommand> for Vec<String> {
+    fn from(command: AgentCommand) -> Self {
+        command.0
+    }
+}
+
+/// Server-owned storage settings, agent launch settings, and repository metadata.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Applied only to new agents; older configurations default to `["pi"]`.
+    #[serde(default)]
+    pub agent_command: AgentCommand,
     /// Resolved and persisted at startup; absent in legacy configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_dir: Option<PathBuf>,
@@ -270,6 +315,55 @@ mod tests {
         assert!(config.remove_server(0, dir.path()).is_err());
         assert_eq!(config.last_server_index(), Some(0));
         assert_eq!(config.servers.len(), 2);
+    }
+
+    #[test]
+    fn agent_command_defaults_and_round_trips_literal_arguments() {
+        assert_eq!(
+            ServerConfig::default().agent_command,
+            AgentCommand::default()
+        );
+        for json in [r#"{"repositories":[]}"#, r#"{"repositories":["legacy"]}"#] {
+            let config: ServerConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(config.agent_command, AgentCommand::default());
+        }
+        let arguments = vec![
+            "/path with spaces/pi".to_owned(),
+            "".to_owned(),
+            "literal '$HOME'; $(not-a-command)\n".to_owned(),
+        ];
+        let config: ServerConfig = serde_json::from_value(serde_json::json!({
+            "repositories": [],
+            "agent_command": arguments,
+        }))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.json");
+        save(&path, &config).unwrap();
+        let loaded: ServerConfig = load(&path).unwrap();
+        assert_eq!(loaded.agent_command, config.agent_command);
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(saved["agent_command"], serde_json::json!(arguments));
+    }
+
+    #[test]
+    fn agent_command_rejects_invalid_settings_without_echoing_arguments() {
+        for command in [
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!(["pi\0secret-value"]),
+            serde_json::json!(["pi", "secret-value\0"]),
+            serde_json::json!("pi --flag"),
+            serde_json::json!(null),
+            serde_json::json!(["pi", 42]),
+        ] {
+            let result = serde_json::from_value::<ServerConfig>(serde_json::json!({
+                "repositories": [],
+                "agent_command": command,
+            }));
+            let error = result.err().expect("invalid command accepted").to_string();
+            assert!(!error.contains("secret-value"));
+        }
     }
 
     #[test]

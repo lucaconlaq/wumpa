@@ -62,6 +62,7 @@ in
     mise
     nodejs_24
     ripgrep
+    tmux
     tree
     unzip
     wumpa
@@ -72,7 +73,7 @@ in
     description = "Wumpa server";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
-    path = [ pkgs.git pkgs.openssh ];
+    path = [ pkgs.git pkgs.openssh pkgs.tmux ];
     environment = {
       HOME = "/home/wumpa";
       WUMPA_SERVER_CONFIG = "/home/wumpa/.config/wumpa/server.json";
@@ -81,7 +82,14 @@ in
       Type = "simple";
       User = "wumpa";
       WorkingDirectory = "/home/wumpa";
-      ExecStart = "${wumpa}/bin/wumpa serve --port 7432";
+      ExecStart = "${wumpa}/bin/wumpa serve --socket /run/wumpa/control.sock --port 7432";
+      RuntimeDirectory = "wumpa";
+      RuntimeDirectoryMode = "0700";
+      RuntimeDirectoryPreserve = "yes";
+      UMask = "0077";
+      # The dedicated tmux server/agent supervisors survive daemon restart/stop.
+      # Checkout removal is reconciled by the surviving supervisors themselves.
+      KillMode = "process";
       Restart = "on-failure";
       RestartSec = "5s";
       # SSH-forwarded agent sockets must remain accessible under /tmp.
