@@ -770,6 +770,11 @@ mod unix {
                 exchange.deadline = deadline + Duration::from_secs(15);
                 let response = match result {
                     Err(failure) => crate::sessions::LocalResponse::Failed { failure },
+                    Ok(()) if !cfg!(target_os = "linux") => {
+                        crate::sessions::LocalResponse::Failed {
+                            failure: crate::sessions::Failure::UnsupportedPlatform,
+                        }
+                    }
                     Ok(()) => {
                         let config = config
                             .lock()
@@ -950,7 +955,7 @@ mod unix {
                         let mut next_refresh = Instant::now();
                         let mut failing_since = None;
                         while !stopping.load(Ordering::Relaxed) {
-                            if Instant::now() >= next_refresh {
+                            if cfg!(target_os = "linux") && Instant::now() >= next_refresh {
                                 if let Ok(mut state) = manager.try_lock() {
                                     // Restart discovery does not require a dashboard or a new launch.
                                     if state.is_none() {
@@ -1396,7 +1401,7 @@ mod unix {
         }
 
         #[test]
-        fn non_utf8_canonical_paths_fail_before_creating_runtime_files() {
+        fn non_utf8_socket_names_fail_before_creating_runtime_files() {
             use std::ffi::OsStr;
             let dir = directory();
             let path = dir.path().join(OsStr::from_bytes(b"control-\xff"));
@@ -1408,6 +1413,15 @@ mod unix {
                     .contains("UTF-8")
             );
             assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+
+        // This fixture requires a filesystem that permits non-UTF-8 filenames.
+        // macOS filesystems can reject the directory itself with EILSEQ.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn non_utf8_canonical_parents_fail_before_creating_runtime_files() {
+            use std::ffi::OsStr;
+            let dir = directory();
             let parent = dir.path().join(OsStr::from_bytes(b"runtime-\xff"));
             fs::create_dir(&parent).unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();

@@ -161,6 +161,7 @@ pub enum Failure {
     CapacityExceeded,
     OutcomeUnknown,
     BackendUnavailable,
+    UnsupportedPlatform,
     UnsupportedFilesystem,
     AgentUnavailable,
     InvalidEnvironment,
@@ -168,6 +169,17 @@ pub enum Failure {
     RelativeExecutableUnsupported,
     LaunchFailed,
     CleanupFailed,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedPlatform => f.write_str(
+                "Agent sessions require a Linux server. Repository browsing and cloning remain available.",
+            ),
+            _ => write!(f, "{self:?}"),
+        }
+    }
 }
 
 impl From<crate::session_environment::Error> for Failure {

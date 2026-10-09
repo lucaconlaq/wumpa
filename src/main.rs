@@ -48,7 +48,7 @@ enum Commands {
         #[arg(long, hide = true, conflicts_with = "detach")]
         ready_file: Option<std::path::PathBuf>,
     },
-    /// Create or attach a coding agent in the current registered checkout
+    /// Create or attach a coding agent in a registered checkout (Linux servers only)
     Agent {
         /// Absolute local control socket; no TCP/config fallback
         #[arg(long)]

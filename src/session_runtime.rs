@@ -133,6 +133,7 @@ struct RuntimeIdentity {
 }
 
 /// Only the private one-shot launch channel carries secrets.
+#[cfg(target_os = "linux")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Launch {
@@ -760,7 +761,7 @@ impl Manager {
                     #[cfg(not(target_os = "linux"))]
                     {
                         let _ = (request_id, environment, name);
-                        return Err(Failure::BackendUnavailable);
+                        Err(Failure::UnsupportedPlatform)
                     }
                     #[cfg(target_os = "linux")]
                     {

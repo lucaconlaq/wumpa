@@ -69,7 +69,7 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
             LocalResponse::Created { session_id } => session_id,
             LocalResponse::Failed { failure } => {
                 return Err(format!(
-                    "Agent retry failed: {failure:?}; no additional agent was launched"
+                    "Agent retry failed: {failure}; no additional agent was launched"
                 )
                 .into());
             }
@@ -84,7 +84,7 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
         )? {
             LocalResponse::Listed { sessions } => sessions,
             LocalResponse::Failed { failure } => {
-                return Err(format!("Agent listing failed: {failure:?}").into());
+                return Err(format!("Agent listing failed: {failure}").into());
             }
             _ => return Err("invalid agent list response".into()),
         };
@@ -111,7 +111,7 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
                 match result {
                     Ok(LocalResponse::Created { session_id }) => session_id,
                     Ok(LocalResponse::Failed { failure }) if failure != Failure::OutcomeUnknown => {
-                        return Err(format!("Agent creation failed: {failure:?}").into());
+                        return Err(format!("Agent creation failed: {failure}").into());
                     }
                     _ => {
                         output::info("Retry key", format!("{}:{key}", handshake.run_id));
@@ -131,7 +131,7 @@ pub fn run(socket: &Path, retry: Option<&str>, plain: bool) -> Result<()> {
         LocalResponse::Attached { attachment } => attachment,
         LocalResponse::Failed { failure } => {
             return Err(format!(
-                "Agent attachment failed: {failure:?}; an existing agent was not stopped"
+                "Agent attachment failed: {failure}; an existing agent was not stopped"
             )
             .into());
         }
