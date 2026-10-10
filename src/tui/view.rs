@@ -595,10 +595,54 @@ fn worktree_label(worktree: &crate::worktrees::Worktree) -> String {
         "unknown branch"
     });
     format!(
-        " [{}]{}",
+        " [{}]{}{}",
         clean(branch),
-        if worktree.prunable { " [prunable]" } else { "" }
+        if worktree.prunable { " [prunable]" } else { "" },
+        changes_label(worktree)
     )
+}
+
+fn changes_label(worktree: &crate::worktrees::Worktree) -> String {
+    if worktree.bare || worktree.prunable {
+        return String::new();
+    }
+    match &worktree.changes {
+        Some(changes) if !changes.dirty => " · clean".into(),
+        Some(changes) => {
+            let untracked = if changes.untracked > 0 {
+                format!(" · {} untracked", changes.untracked)
+            } else {
+                String::new()
+            };
+            format!(
+                " · dirty +{} -{}{untracked}",
+                changes.added, changes.removed
+            )
+        }
+        None => " · changes unavailable".into(),
+    }
+}
+
+#[test]
+fn checkout_change_labels_distinguish_clean_dirty_and_unknown() {
+    use crate::worktrees::{Changes, Worktree};
+    let mut tree = Worktree::default();
+    assert_eq!(changes_label(&tree), " · changes unavailable");
+    tree.changes = Some(Changes::default());
+    assert_eq!(changes_label(&tree), " · clean");
+    tree.changes = Some(Changes {
+        dirty: true,
+        added: 12,
+        removed: 3,
+        untracked: 2,
+    });
+    assert_eq!(changes_label(&tree), " · dirty +12 -3 · 2 untracked");
+    tree.changes.as_mut().unwrap().untracked = 0;
+    tree.changes.as_mut().unwrap().added = 0;
+    tree.changes.as_mut().unwrap().removed = 0;
+    assert_eq!(changes_label(&tree), " · dirty +0 -0");
+    tree.bare = true;
+    assert_eq!(changes_label(&tree), "");
 }
 
 fn repository_name(url: &str) -> String {

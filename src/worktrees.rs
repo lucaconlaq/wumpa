@@ -18,6 +18,18 @@ pub struct Worktree {
     pub detached: bool,
     pub bare: bool,
     pub prunable: bool,
+    #[serde(default)]
+    pub changes: Option<Changes>,
+}
+
+/// Uncommitted tracked-line totals across the index and working tree.
+/// Untracked files are reported separately; binary and mode changes still mark dirty.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Changes {
+    pub dirty: bool,
+    pub added: u64,
+    pub removed: u64,
+    pub untracked: usize,
 }
 
 /// Discovery errors belong to one repository, not the whole workspace.
@@ -48,6 +60,11 @@ pub fn discover(repositories: &[Repository]) -> Vec<RepositoryWorktrees> {
                             if entry.path == canonical {
                                 entry.path = path.clone();
                             }
+                        }
+                    }
+                    for entry in &mut entries {
+                        if !entry.bare && !entry.prunable {
+                            entry.changes = changes(&entry.path, deadline).ok();
                         }
                     }
                     let size = serde_json::to_vec(&entries)
@@ -134,6 +151,73 @@ pub(crate) fn git_output(path: &Path, args: &[&str], deadline: Instant) -> Resul
     Ok(bytes)
 }
 
+fn changes(path: &Path, deadline: Instant) -> Result<Changes> {
+    let status = git_output(
+        path,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        deadline,
+    )?;
+    let mut changes = Changes {
+        dirty: !status.is_empty(),
+        ..Default::default()
+    };
+    let mut records = status.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        if record.starts_with(b"?? ") {
+            changes.untracked += 1;
+        }
+        // Renames/copies have a second NUL-delimited pathname.
+        if record
+            .get(..2)
+            .is_some_and(|xy| xy.iter().any(|b| matches!(b, b'R' | b'C')))
+        {
+            records.next();
+        }
+    }
+    for cached in [false, true] {
+        let mut args = vec![
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+        ];
+        if cached {
+            args.push("--cached");
+        }
+        args.push("--");
+        let output = git_output(path, &args, deadline)?;
+        add_numstat(&mut changes, &output)?;
+    }
+    Ok(changes)
+}
+
+fn add_numstat(changes: &mut Changes, bytes: &[u8]) -> Result<()> {
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let added = fields.next().ok_or("Missing added line count")?;
+        let removed = fields.next().ok_or("Missing removed line count")?;
+        fields.next().ok_or("Missing diff pathname")?;
+        if added == b"-" && removed == b"-" {
+            continue;
+        }
+        changes.added += std::str::from_utf8(added)?.parse::<u64>()?;
+        changes.removed += std::str::from_utf8(removed)?.parse::<u64>()?;
+    }
+    Ok(())
+}
+
 fn parse(bytes: &[u8]) -> Result<Vec<Worktree>> {
     let text = std::str::from_utf8(bytes).map_err(|_| "Worktree metadata is not UTF-8")?;
     let mut entries = Vec::new();
@@ -175,6 +259,60 @@ fn parse(bytes: &[u8]) -> Result<Vec<Worktree>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_text_but_not_binary_numstat_records() {
+        let mut counts = Changes::default();
+        add_numstat(
+            &mut counts,
+            b"12\t3\tfile\twith\nwhitespace\0-\t-\tbinary\0",
+        )
+        .unwrap();
+        assert_eq!((counts.added, counts.removed), (12, 3));
+        assert!(add_numstat(&mut counts, b"invalid\0").is_err());
+    }
+
+    #[test]
+    fn observes_index_working_tree_untracked_and_unborn_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        let inspect = || changes(dir.path(), Instant::now() + Duration::from_secs(5)).unwrap();
+        run(&["init"]);
+        assert!(!inspect().dirty);
+        std::fs::write(dir.path().join("file"), "one\ntwo\n").unwrap();
+        assert_eq!(inspect().untracked, 1);
+        run(&["add", "file"]);
+        assert_eq!(inspect().added, 2);
+        run(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        assert!(!inspect().dirty);
+        std::fs::write(dir.path().join("file"), "one\nthree\n").unwrap();
+        run(&["add", "file"]);
+        std::fs::write(dir.path().join("file"), "one\nthree\nfour\n").unwrap();
+        std::fs::write(dir.path().join("new\nfile"), "untracked\n").unwrap();
+        let counts = inspect();
+        assert!(counts.dirty);
+        assert_eq!((counts.added, counts.removed, counts.untracked), (2, 1, 1));
+        assert!(changes(dir.path(), Instant::now()).is_err());
+    }
 
     #[test]
     fn parses_nul_paths_and_worktree_states() {

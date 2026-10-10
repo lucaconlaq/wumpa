@@ -29,3 +29,9 @@ server from your terminal. Open checkouts in Zed without juggling SSH sessions.
    `user@host` (default port: `7432`), then Enter to connect. Use the on-screen
    shortcuts to manage repositories, worktrees, and agents; press `z` to open a
    checkout in Zed.
+
+The dashboard shows `clean` or `dirty +added -removed` beside each checkout and
+worktree. Line totals sum staged and unstaged tracked changes (a modified line
+counts as a removal and an addition); untracked files are counted separately.
+Binary, mode, and submodule changes can be dirty with zero line changes. Totals
+update with the workspace refresh; unavailable Git metadata is never shown as clean.
