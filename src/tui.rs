@@ -143,6 +143,7 @@ struct App {
     delete_second: bool,
     delete_input: String,
     details: bool,
+    server_details: Option<std::result::Result<Response, String>>,
     details_scroll: u16,
     zed_launch: Option<zed::Launch>,
     ssh_command: Option<std::process::Command>,
@@ -181,6 +182,7 @@ impl App {
             delete_second: false,
             delete_input: String::new(),
             details: false,
+            server_details: None,
             details_scroll: 0,
             zed_launch: None,
             ssh_command: None,
@@ -293,6 +295,12 @@ impl App {
         let target = job.target;
         let cloning = job.cloning;
         self.job = None;
+        // Inspecting a server must not replace or persist the active workspace.
+        if self.details && self.pane == Pane::Servers {
+            self.server_details = Some(result);
+            self.status = "Server details. i/Esc to close.".into();
+            return;
+        }
         match result {
             Ok(response) => {
                 self.delete_prompt = response.deletion.clone();
@@ -818,6 +826,25 @@ impl App {
             }
             return false;
         }
+        if self.details && self.pane == Pane::Servers {
+            match key.code {
+                KeyCode::Char('i') | KeyCode::Esc | KeyCode::Char('s') => {
+                    self.job = None;
+                    self.server_details = None;
+                    self.details = false;
+                    self.status = "Choose a workspace. Enter to open · i for details.".into();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.details_scroll = self.details_scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.details_scroll = self.details_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('q') => return true,
+                _ => {}
+            }
+            return false;
+        }
         if self.details {
             match key.code {
                 KeyCode::Char('i') | KeyCode::Esc => self.details = false,
@@ -905,6 +932,14 @@ impl App {
             KeyCode::Char('s') => self.switch_servers(),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(true),
+            KeyCode::Char('i') if self.pane == Pane::Servers && self.job.is_none() => {
+                if let Some(target) = self.servers.selected() {
+                    self.start(target, Request::List);
+                    self.server_details = None;
+                    self.details = true;
+                    self.details_scroll = 0;
+                }
+            }
             KeyCode::Char('i')
                 if self.pane == Pane::Repositories
                     && self.job.is_none()
@@ -2123,6 +2158,71 @@ mod tests {
             checkout_path: None,
         }];
         app
+    }
+
+    #[test]
+    fn server_details_load_without_replacing_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = removal_app(dir.path().join("client.json"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        app.config.servers[0].connection = Connection::Local {
+            port: listener.local_addr().unwrap().port(),
+        };
+        app.key(key(KeyCode::Char('i')));
+        assert!(app.details);
+        assert!(app.job.is_some());
+        assert!(screen(&mut app, 100, 30).contains("Loading…"));
+        complete_job(
+            &mut app,
+            0,
+            Ok(Response {
+                server_version: Some("9.8.7".into()),
+                ..Default::default()
+            }),
+        );
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("Server details"));
+        assert!(text.contains("Name: First"));
+        assert!(text.contains("Reachable"));
+        assert!(text.contains("Wumpa version: 9.8.7"));
+        assert!(app.pane == Pane::Servers);
+        assert_eq!(app.workspace, Some(1));
+        assert_eq!(app.connected, Some(1));
+        assert_eq!(app.repositories.len(), 1);
+        assert_eq!(app.config.last_server.as_deref(), Some("Second"));
+        assert!(!app.path.exists());
+        app.key(key(KeyCode::Char('z')));
+        app.key(key(KeyCode::Char('t')));
+        app.key(key(KeyCode::Enter));
+        assert!(app.details);
+        assert!(app.zed_launch.is_none());
+        assert!(app.ssh_command.is_none());
+
+        complete_job(&mut app, 0, Ok(Response::default()));
+        assert!(screen(&mut app, 100, 30).contains("Unavailable — update the server"));
+        complete_job(&mut app, 0, Err("connection refused".into()));
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("Request failed"));
+        assert!(text.contains("connection refused"));
+        app.key(key(KeyCode::Esc));
+        assert!(!app.details);
+        assert!(app.server_details.is_none());
+        assert_eq!(app.servers.selected(), Some(0));
+
+        app.key(key(KeyCode::Char('i')));
+        let cancelled = app.job.as_ref().unwrap().cancelled.clone();
+        app.key(key(KeyCode::Char('i')));
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(app.job.is_none());
+        assert!(!app.details);
+    }
+
+    #[test]
+    fn server_details_ignore_an_empty_selection() {
+        let mut app = App::new(ClientConfig::default(), PathBuf::new());
+        app.key(key(KeyCode::Char('i')));
+        assert!(!app.details);
+        assert!(app.job.is_none());
     }
 
     #[test]

@@ -78,6 +78,9 @@ pub struct Preflight {
 /// Current repository metadata and an optional operation failure.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Response {
+    /// Application version of the running daemon, absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
     pub repositories: Vec<String>,
     /// Discovery hint for the server-local attachment helper, not a tmux target.
     /// The helper must authenticate this endpoint through the local handshake.
@@ -252,6 +255,18 @@ mod tests {
         let legacy: Response =
             serde_json::from_str(r#"{"repositories":["legacy"],"error":null}"#).unwrap();
         assert!(legacy.repository_entries()[0].checkout_path.is_none());
+        assert!(legacy.server_version.is_none());
+        let response = Response {
+            server_version: Some(env!("CARGO_PKG_VERSION").into()),
+            ..Default::default()
+        };
+        let mut bytes = Vec::new();
+        write_message(&response, &mut bytes).unwrap();
+        let decoded: Response = read_message(bytes.as_slice()).unwrap();
+        assert_eq!(
+            decoded.server_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

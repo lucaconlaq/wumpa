@@ -304,7 +304,12 @@ impl App {
                 ("t", "SSH"),
             ]
         } else {
-            vec![("Enter", "Open"), ("n", "New server"), ("d", "Remove")]
+            vec![
+                ("Enter", "Open"),
+                ("i", "Details"),
+                ("n", "New server"),
+                ("d", "Remove"),
+            ]
         };
         let mut shortcuts = Vec::new();
         for (key, label) in actions {
@@ -386,7 +391,44 @@ impl App {
             );
         }
     }
+    fn draw_server_details(&mut self, frame: &mut Frame) {
+        let Some(server) = self
+            .servers
+            .selected()
+            .and_then(|i| self.config.servers.get(i))
+        else {
+            return;
+        };
+        let (status, version, error) = match &self.server_details {
+            None => ("Contacting…", "Loading…", None),
+            Some(Ok(response)) => (
+                "Reachable",
+                response
+                    .server_version
+                    .as_deref()
+                    .unwrap_or("Unavailable — update the server"),
+                response.error.as_deref(),
+            ),
+            Some(Err(error)) => ("Request failed", "Unavailable", Some(error.as_str())),
+        };
+        let mut text = format!(
+            "Name: {}\n\nConnection: {}\n\nStatus: {}\n\nWumpa version: {}",
+            clean(&server.name),
+            connection_label(&server.connection),
+            status,
+            clean(version),
+        );
+        if let Some(error) = error {
+            text.push_str(&format!("\n\nError: {}", clean(error)));
+        }
+        self.draw_details_popup(frame, " Server details ", &text, "↑↓ Scroll · i/Esc Close");
+    }
+
     fn draw_details(&mut self, frame: &mut Frame) {
+        if self.pane == Pane::Servers {
+            self.draw_server_details(frame);
+            return;
+        }
         let Some((entry, worktree)) = self.selected_checkout() else {
             return;
         };
@@ -437,6 +479,15 @@ impl App {
         {
             text.push_str(&format!("\n\nWorktree discovery: {}", clean(error)));
         }
+        let footer = if self.selected_agent().is_some() {
+            "↑↓ Scroll · i/Esc Close · z Open in Zed · Enter Attach"
+        } else {
+            "↑↓ Scroll · i/Esc Close · z Open in Zed · t SSH"
+        };
+        self.draw_details_popup(frame, " Repository details ", &text, footer);
+    }
+
+    fn draw_details_popup(&mut self, frame: &mut Frame, title: &str, text: &str, footer: &str) {
         let area = frame.area();
         let width = 88.min(area.width.saturating_sub(4));
         let height = 24.min(area.height.saturating_sub(4));
@@ -447,20 +498,15 @@ impl App {
             height,
         );
         frame.render_widget(Clear, popup);
-        frame.render_widget(panel(" Repository details ", true), popup);
+        frame.render_widget(panel(title, true), popup);
         let body = Rect::new(popup.x + 2, popup.y + 1, width - 4, height - 4);
-        let lines = detail_lines(&text, usize::from(body.width));
+        let lines = detail_lines(text, usize::from(body.width));
         let max_scroll =
             u16::try_from(lines.len().saturating_sub(usize::from(body.height))).unwrap_or(u16::MAX);
         self.details_scroll = self.details_scroll.min(max_scroll);
         frame.render_widget(Paragraph::new(lines).scroll((self.details_scroll, 0)), body);
         frame.render_widget(
-            Paragraph::new(if self.selected_agent().is_some() {
-                "↑↓ Scroll · i/Esc Close · z Open in Zed · Enter Attach"
-            } else {
-                "↑↓ Scroll · i/Esc Close · z Open in Zed · t SSH"
-            })
-            .style(Style::default().fg(ACCENT)),
+            Paragraph::new(footer).style(Style::default().fg(ACCENT)),
             Rect::new(body.x, popup.y + height - 2, body.width, 1),
         );
     }

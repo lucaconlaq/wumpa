@@ -247,6 +247,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                     };
                     let config = config.lock().map_err(|_| "configuration lock poisoned")?;
                     let mut response = Response {
+                        server_version: Some(env!("CARGO_PKG_VERSION").into()),
                         control_socket: Some(control_socket),
                         repository_dir: config.repository_dir.clone(),
                         home_dir: std::env::var_os("HOME")

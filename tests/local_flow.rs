@@ -54,6 +54,7 @@ fn start(path: &Path, port: u16) -> Daemon {
             let response: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert_eq!(response.get("error"), Some(&serde_json::Value::Null));
             assert!(response["repositories"].is_array());
+            assert_eq!(response["server_version"], env!("CARGO_PKG_VERSION"));
             return daemon;
         }
         thread::sleep(Duration::from_millis(20));

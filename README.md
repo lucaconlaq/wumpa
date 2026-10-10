@@ -30,5 +30,8 @@ server from your terminal. Open checkouts in Zed without juggling SSH sessions.
    shortcuts to manage repositories, worktrees, and agents; press `z` to open a
    checkout in Zed.
 
+In the server list, press `i` to view connection details and the running server's
+Wumpa version. Press `i` or Esc to close; older servers show the version as unavailable.
+
 SSH access is required for remote connections; Zed is optional.
 Use `wumpa --plain` for text menus or `wumpa --help` for commands.
