@@ -129,6 +129,7 @@ in
     extraConfig = ''
       set -g status off
       set -g extended-keys on
+      set -g extended-keys-format csi-u
       set -s set-clipboard on
     '';
   };
