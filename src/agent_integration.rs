@@ -73,7 +73,7 @@ mod linux {
                 return Err("Pi activity endpoint exceeds the Unix path limit".into());
             }
             let anchor = private_directory(&directory)?;
-            let extension = directory.join(format!("pi-v{VERSION}.ts"));
+            let extension = directory.join("wumpa-pi.ts");
             let mut source = tempfile::NamedTempFile::new_in(&directory)?;
             source
                 .as_file()
@@ -285,7 +285,7 @@ mod linux {
             let retained = first.metadata.directory.clone();
             first.launched();
             drop(first);
-            assert!(retained.join("pi-v1.ts").exists());
+            assert!(retained.join("wumpa-pi.ts").exists());
             let removed = second.metadata.directory.clone();
             drop(second);
             assert!(!removed.exists());
@@ -307,7 +307,7 @@ mod linux {
             std::fs::rename(&resource.metadata.directory, &saved).unwrap();
             std::os::unix::fs::symlink(&saved, &resource.metadata.directory).unwrap();
             drop(resource);
-            assert!(saved.join("pi-v1.ts").exists());
+            assert!(saved.join("wumpa-pi.ts").exists());
         }
 
         #[test]

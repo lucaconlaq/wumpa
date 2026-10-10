@@ -1212,7 +1212,7 @@ fn real_pi_uses_embedded_source_and_keeps_it_through_reload_and_daemon_restart()
     )
     .unwrap();
     let directory = PathBuf::from(record["pi"]["directory"].as_str().unwrap());
-    let source = directory.join("pi-v1.ts");
+    let source = directory.join("wumpa-pi.ts");
     let endpoint = directory.join(format!("a-{id}.activity.sock"));
     wait(|| endpoint.exists() && sentinel.exists());
     let subscribe = || {

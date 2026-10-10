@@ -80,8 +80,9 @@ without affecting Pi.
 
 **Occupied endpoints are deliberately not reclaimed by the extension.** The
 runner creates an exclusive per-agent directory and atomically publishes the
-embedded source as `pi-v1.ts` with mode `0600`. The directory remains available
-through reloads and daemon restarts. After verified descendant termination, the
+embedded source as `wumpa-pi.ts` with mode `0600`, identifying the integration in
+Pi's extension list. The source version is retained in runner metadata. The
+directory remains available through reloads and daemon restarts. After verified descendant termination, the
 runner removes its directory, including stale sockets/staging files left by
 abrupt Pi exit. It pins and checks directory identity before cleanup and does not
 follow symlinks. Error unwinds after spawn retain resources, rather than deleting
