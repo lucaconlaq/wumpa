@@ -113,6 +113,7 @@ in
     enable = true;
     extraConfig = ''
       set -g status off
+      set -g extended-keys on
       set -s set-clipboard on
     '';
   };
