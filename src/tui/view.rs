@@ -197,6 +197,7 @@ impl App {
                     .enumerate()
                     .map(|(row, (index, worktree, agent))| {
                         let repo = &self.repositories[index];
+                        let mut changes_tree = worktree.filter(|_| agent.is_none());
                         let label =
                             if let Some(agent) = agent {
                                 let next_sibling = checkout_rows.get(row + 1).is_some_and(
@@ -222,7 +223,7 @@ impl App {
                                     if next_sibling { "├" } else { "└" },
                                     clean(agent.display_name()),
                                     id,
-                                    agent.display_state()
+                                    agent_activity_label(agent, self.tick)
                                 )
                             } else if let Some(worktree) = worktree {
                                 let name = display_path(&worktree.path, self.home_dir.as_deref());
@@ -248,6 +249,7 @@ impl App {
                                         Some(&entry.path) == repo.checkout_path.as_ref()
                                     })
                                 });
+                                changes_tree = main;
                                 format!(
                                     " {}{}{}",
                                     repository_name(&repo.url),
@@ -259,16 +261,20 @@ impl App {
                                     }
                                 )
                             };
-                        ListItem::new(Line::styled(
+                        let mut line = Line::styled(
                             label,
                             if agent.is_some() {
-                                Style::default().fg(STATUS)
+                                Style::default().fg(ACCENT)
                             } else if worktree.is_some() {
                                 Style::default().fg(MUTED)
                             } else {
                                 Style::default().add_modifier(Modifier::BOLD)
                             },
-                        ))
+                        );
+                        if let Some(tree) = changes_tree {
+                            line.spans.extend(changes_label(tree).spans);
+                        }
+                        ListItem::new(line)
                     })
                     .collect();
                 frame.render_stateful_widget(
@@ -313,7 +319,7 @@ impl App {
                 ("a", "Clone"),
                 ("i", "Details"),
                 ("z", "Zed"),
-                ("t", "SSH"),
+                ("Enter", "SSH"),
             ]
         } else {
             vec![
@@ -488,7 +494,7 @@ impl App {
         let footer = if self.selected_agent().is_some() {
             "↑↓ Scroll · i/Esc Close · z Open in Zed · Enter Attach"
         } else {
-            "↑↓ Scroll · i/Esc Close · z Open in Zed · t SSH"
+            "↑↓ Scroll · i/Esc Close · z Open in Zed · Enter SSH"
         };
         self.draw_details_popup(frame, " Repository details ", &text, footer);
     }
@@ -515,6 +521,17 @@ impl App {
             Paragraph::new(footer).style(Style::default().fg(ACCENT)),
             Rect::new(body.x, popup.y + height - 2, body.width, 1),
         );
+    }
+}
+
+fn agent_activity_label(agent: &crate::session_runtime::Summary, tick: usize) -> String {
+    if agent.state == crate::sessions::State::Running
+        && agent.activity == crate::agent_activity::Activity::Working
+    {
+        let spinner = ["◐", "◓", "◑", "◒"][tick % 4];
+        format!("{spinner} {}", agent.display_state())
+    } else {
+        agent.display_state().into()
     }
 }
 
@@ -595,31 +612,25 @@ fn worktree_label(worktree: &crate::worktrees::Worktree) -> String {
         "unknown branch"
     });
     format!(
-        " [{}]{}{}",
+        " [{}]{}",
         clean(branch),
-        if worktree.prunable { " [prunable]" } else { "" },
-        changes_label(worktree)
+        if worktree.prunable { " [prunable]" } else { "" }
     )
 }
 
-fn changes_label(worktree: &crate::worktrees::Worktree) -> String {
+fn changes_label(worktree: &crate::worktrees::Worktree) -> Line<'static> {
     if worktree.bare || worktree.prunable {
-        return String::new();
+        return Line::default();
     }
     match &worktree.changes {
-        Some(changes) if !changes.dirty => " · clean".into(),
-        Some(changes) => {
-            let untracked = if changes.untracked > 0 {
-                format!(" · {} untracked", changes.untracked)
-            } else {
-                String::new()
-            };
-            format!(
-                " · dirty +{} -{}{untracked}",
-                changes.added, changes.removed
-            )
-        }
-        None => " · changes unavailable".into(),
+        Some(changes) if !changes.dirty => Line::default(),
+        Some(changes) => Line::from(vec![
+            Span::raw(" · "),
+            Span::styled(format!("+{}", changes.added), Style::default().fg(STATUS)),
+            Span::raw(" "),
+            Span::styled(format!("-{}", changes.removed), Style::default().fg(RED)),
+        ]),
+        None => Line::raw(" · changes unavailable"),
     }
 }
 
@@ -627,22 +638,28 @@ fn changes_label(worktree: &crate::worktrees::Worktree) -> String {
 fn checkout_change_labels_distinguish_clean_dirty_and_unknown() {
     use crate::worktrees::{Changes, Worktree};
     let mut tree = Worktree::default();
-    assert_eq!(changes_label(&tree), " · changes unavailable");
+    assert_eq!(changes_label(&tree).to_string(), " · changes unavailable");
     tree.changes = Some(Changes::default());
-    assert_eq!(changes_label(&tree), " · clean");
+    assert_eq!(changes_label(&tree).to_string(), "");
     tree.changes = Some(Changes {
         dirty: true,
         added: 12,
         removed: 3,
         untracked: 2,
     });
-    assert_eq!(changes_label(&tree), " · dirty +12 -3 · 2 untracked");
+    let label = changes_label(&tree);
+    assert_eq!(label.to_string(), " · +12 -3");
+    assert_eq!(label.spans[1].style.fg, Some(STATUS));
+    assert_eq!(label.spans[3].style.fg, Some(RED));
     tree.changes.as_mut().unwrap().untracked = 0;
     tree.changes.as_mut().unwrap().added = 0;
     tree.changes.as_mut().unwrap().removed = 0;
-    assert_eq!(changes_label(&tree), " · dirty +0 -0");
+    assert_eq!(changes_label(&tree).to_string(), " · +0 -0");
     tree.bare = true;
-    assert_eq!(changes_label(&tree), "");
+    assert_eq!(changes_label(&tree).to_string(), "");
+    tree.bare = false;
+    tree.prunable = true;
+    assert_eq!(changes_label(&tree).to_string(), "");
 }
 
 fn repository_name(url: &str) -> String {

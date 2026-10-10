@@ -862,7 +862,7 @@ impl App {
                     self.attach_agent();
                 }
                 KeyCode::Char('n') if self.job.is_none() => self.create_agent(),
-                KeyCode::Char('t') if self.job.is_none() => self.open_ssh(),
+                KeyCode::Enter if self.job.is_none() => self.open_ssh(),
                 KeyCode::Char('s') => self.switch_servers(),
                 KeyCode::Char('q') => return true,
                 _ => {}
@@ -947,9 +947,6 @@ impl App {
             {
                 self.details = true;
                 self.details_scroll = 0;
-            }
-            KeyCode::Char('t') if self.pane == Pane::Repositories && self.job.is_none() => {
-                self.open_ssh()
             }
             KeyCode::Char('z') if self.pane == Pane::Repositories && self.job.is_none() => {
                 self.open_zed()
@@ -1044,9 +1041,10 @@ impl App {
             {
                 self.attach_agent();
             }
-            KeyCode::Char('r') | KeyCode::Enter
-                if self.pane == Pane::Repositories && self.job.is_none() =>
-            {
+            KeyCode::Enter if self.pane == Pane::Repositories && self.job.is_none() => {
+                self.open_ssh();
+            }
+            KeyCode::Char('r') if self.pane == Pane::Repositories && self.job.is_none() => {
                 if let Some(target) = self.workspace {
                     self.start(target, Request::List);
                 }
@@ -1497,18 +1495,18 @@ mod tests {
         }];
         app.repos.select(Some(0));
         assert!(screen(&mut app, 100, 30).contains("SSH"));
-        app.key(key(KeyCode::Char('t')));
+        app.key(key(KeyCode::Enter));
         let command = app.ssh_command.take().unwrap();
         assert_eq!(
             command.get_args().last().unwrap(),
             "cd '/projects/repo' && exec /bin/sh -c 'exec \"${SHELL:-/bin/sh}\" -i'"
         );
         app.details = true;
-        app.key(key(KeyCode::Char('t')));
+        app.key(key(KeyCode::Enter));
         assert!(!app.details);
         assert!(app.ssh_command.take().is_some());
         app.repositories[0].checkout_path = None;
-        app.key(key(KeyCode::Char('t')));
+        app.key(key(KeyCode::Enter));
         assert!(app.ssh_command.is_none());
         assert!(app.error);
     }
@@ -1695,6 +1693,15 @@ mod tests {
         let text = screen(&mut app, 100, 30);
         assert!(text.contains("Attach"));
         assert!(text.contains("· abcde · Unknown"));
+        app.sessions.as_mut().unwrap().sessions[0].activity =
+            crate::agent_activity::Activity::Working;
+        app.tick = 0;
+        assert!(screen(&mut app, 100, 30).contains("◐ Running"));
+        app.tick = 1;
+        assert!(screen(&mut app, 100, 30).contains("◓ Running"));
+        app.sessions.as_mut().unwrap().sessions[0].activity =
+            crate::agent_activity::Activity::WaitingForInput;
+        assert!(screen(&mut app, 100, 30).contains("· abcde · Waiting for input"));
         assert!(!text.contains(&String::from(first.id.clone())));
         assert!(!text.contains(" t  SSH"));
         app.key(key(KeyCode::Char('t')));

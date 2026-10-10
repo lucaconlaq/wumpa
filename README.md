@@ -28,4 +28,6 @@ server from your terminal. Open checkouts in Zed without juggling SSH sessions.
 3. Run `wumpa` on your computer. Press `n` to add your server's SSH alias or
    `user@host` (default port: `7432`), then Enter to connect. Use the on-screen
    shortcuts to manage repositories, worktrees, and agents; press `z` to open a
-   checkout in Zed.
+   checkout in Zed. Press Enter on a checkout to open SSH, or on an agent to attach.
+   Blue agent rows show an animated indicator while working; dirty checkouts show
+   pale green additions and pale red removals as `+x -y`.

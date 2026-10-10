@@ -121,7 +121,7 @@ fi
     let mut child = Process(command.spawn().unwrap());
     let mut screen = Vec::new();
     wait_for(&mut master, &mut screen, b"fixture-repo");
-    master.write_all(b"t").unwrap();
+    master.write_all(b"\r").unwrap();
     wait_for(&mut master, &mut screen, b"Press Enter to return to Wumpa.");
     let marker = screen
         .windows(14)
