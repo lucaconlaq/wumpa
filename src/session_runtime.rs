@@ -527,7 +527,6 @@ impl Manager {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .args(["-u", "-S"])
             .arg(&self.socket)
-            .args(["-f", "/dev/null"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(output.try_clone()?)
