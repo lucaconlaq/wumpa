@@ -476,7 +476,23 @@ mod unix {
         Ok(None)
     }
 
-    fn endpoint_lock(directory: &File, path: &Path) -> Result<File> {
+    struct EndpointLock(File);
+
+    impl Drop for EndpointLock {
+        fn drop(&mut self) {
+            // Forked children can retain the shared open file description until
+            // exec. Release explicitly instead of waiting for their copies to close.
+            // SAFETY: flock acts on a live descriptor and does not access memory.
+            if unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) } != 0 {
+                crate::output::error(format_args!(
+                    "control endpoint unlock failed: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+        }
+    }
+
+    fn endpoint_lock(directory: &File, path: &Path) -> Result<EndpointLock> {
         let mut name = path
             .file_name()
             .ok_or("missing socket name")?
@@ -511,7 +527,7 @@ mod unix {
             return Err("control endpoint is already locked by another daemon".into());
         }
         // Keep the lock file permanently: unlinking it would split the lock domain.
-        Ok(file)
+        Ok(EndpointLock(file))
     }
 
     fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
@@ -979,7 +995,7 @@ mod unix {
     pub struct Listener {
         path: PathBuf,
         identity: Metadata,
-        _lock: File,
+        _lock: EndpointLock,
         directory: File,
         stop: Arc<AtomicBool>,
         worker: Option<JoinHandle<io::Result<()>>>,
@@ -1303,6 +1319,24 @@ mod unix {
             fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
             assert!(recover_stale_tmux_socket(&stale).unwrap());
             assert!(!stale.exists());
+        }
+
+        #[test]
+        fn endpoint_drop_unlocks_even_with_an_inherited_descriptor() {
+            let dir = directory();
+            let path = dir.path().join("control");
+            let listener = Listener::bind(&path).unwrap();
+            // A duplicate shares the open file description just like fork does,
+            // without running unsafe post-fork code in a multithreaded test.
+            let inherited = listener._lock.0.try_clone().unwrap();
+            assert!(Listener::bind(&path).is_err());
+            drop(listener);
+            let restarted = Listener::bind(&path).unwrap();
+            drop(inherited);
+            // Closing the old descriptor must not unlock the new owner's lock.
+            assert!(Listener::bind(&path).is_err());
+            assert!(handshake(&path).is_ok());
+            drop(restarted);
         }
 
         #[test]
