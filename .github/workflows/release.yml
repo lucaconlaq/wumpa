@@ -1,35 +1,20 @@
-name: Release
+name: CI and Release
 
 on:
   push:
+    branches: ["**"]
     tags: ["v[0-9]*"]
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  GH_TOKEN: ${{ github.token }}
-  GH_REPO: ${{ github.repository }}
-  TAG: ${{ github.ref_name }}
-
 jobs:
-  draft:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Prepare draft release
-        run: |
-          if gh release view "$TAG" --json isDraft > release.json; then
-            jq -e '.isDraft' release.json
-          else
-            gh release create "$TAG" --draft --verify-tag --generate-notes
-          fi
-
   build:
-    needs: draft
     strategy:
       fail-fast: false
       matrix:
@@ -54,20 +39,45 @@ jobs:
         run: cargo +stable test --locked --target "${{ matrix.target }}"
       - name: Build
         run: cargo +stable build --locked --release --target "${{ matrix.target }}"
-      - name: Upload archive to draft
+      - name: Package release archive
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
           archive="wumpa-${{ matrix.target }}.tar.gz"
           tar -czf "$archive" -C "target/${{ matrix.target }}/release" wumpa
-          gh release upload "$TAG" "$archive" --clobber
+      - name: Upload release artifact
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: wumpa-${{ matrix.target }}
+          path: wumpa-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
 
   release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wumpa-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare draft release
+        run: |
+          if gh release view "$TAG" --json isDraft > release.json; then
+            jq -e '.isDraft' release.json
+          else
+            gh release create "$TAG" --draft --verify-tag --generate-notes
+          fi
       - name: Publish release
         run: |
-          gh release download "$TAG" --pattern 'wumpa-*.tar.gz' --dir dist
           cd dist
           sha256sum *.tar.gz > SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS --clobber
+          gh release upload "$TAG" *.tar.gz SHA256SUMS --clobber
           gh release edit "$TAG" --draft=false
