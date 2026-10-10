@@ -4,11 +4,11 @@ let
   # Keep this inline: update.sh transfers only server.nix to TNT.
   wumpa = pkgs.stdenvNoCC.mkDerivation rec {
     pname = "wumpa";
-    version = "0.4.0";
+    version = "0.5.2";
 
     src = pkgs.fetchurl {
       url = "https://github.com/lucaconlaq/wumpa/releases/download/v${version}/wumpa-x86_64-unknown-linux-musl.tar.gz";
-      hash = "sha256-PkdM3cbM88EDGPtGv8wzdjrVoE54RgCpYT50nOWZhj0=";
+      hash = "sha256-DQbe/y4VwdBPivHUiwfY+D/3Qxu73n6FSGZ57+KUm3k=";
     };
 
     dontUnpack = true;
