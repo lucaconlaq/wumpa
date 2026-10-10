@@ -2068,6 +2068,24 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_shortcuts_use_matching_key_badges() {
+        let mut app = App::new(ClientConfig::default(), PathBuf::from("client.json"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for pane in [Pane::Servers, Pane::Repositories] {
+            app.pane = pane;
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            for row in [27, 28] {
+                let key = &buffer[(2, row)];
+                assert_eq!(key.fg, view::ACCENT);
+                assert_eq!(key.bg, view::PANEL);
+                let label = &buffer[(10, row)];
+                assert_ne!(label.bg, view::PANEL);
+            }
+        }
+    }
+
+    #[test]
     fn renders_empty_dashboard_forms_and_small_terminal() {
         let mut app = App::new(ClientConfig::default(), PathBuf::from("client.json"));
         for (width, height) in [(100, 30), (60, 20), (20, 5)] {

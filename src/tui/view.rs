@@ -20,6 +20,18 @@ pub(super) const ACCENT: Color = Color::Rgb(125, 211, 252);
 const STATUS: Color = Color::Rgb(134, 223, 182);
 const RED: Color = Color::Rgb(255, 132, 144);
 
+fn shortcut_line(actions: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (key, label) in actions {
+        spans.push(Span::styled(
+            format!(" {key} "),
+            Style::default().fg(ACCENT).bg(PANEL),
+        ));
+        spans.push(Span::styled(format!("{label} "), Style::default().fg(TEXT)));
+    }
+    Line::from(spans)
+}
+
 impl App {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
@@ -311,31 +323,25 @@ impl App {
                 ("d", "Remove"),
             ]
         };
-        let mut shortcuts = Vec::new();
-        for (key, label) in actions {
-            shortcuts.push(Span::styled(
-                format!(" {key} "),
-                Style::default().fg(ACCENT).bg(PANEL),
-            ));
-            shortcuts.push(Span::styled(
-                format!(" {label}  "),
-                Style::default().fg(TEXT),
-            ));
-        }
+        let navigation = if in_workspace {
+            vec![
+                ("c", "Clone saved"),
+                ("d", "Delete"),
+                ("r", "Refresh"),
+                ("s", "Switch server"),
+                ("q", "Quit"),
+            ]
+        } else if self.workspace.is_some() {
+            vec![
+                ("↑↓", "Navigate"),
+                ("Esc", "Back to workspace"),
+                ("q", "Quit"),
+            ]
+        } else {
+            vec![("↑↓", "Navigate"), ("q", "Quit")]
+        };
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(shortcuts),
-                Line::styled(
-                    if in_workspace {
-                        " c Clone saved   d Delete   r Refresh   s Switch server   q Quit"
-                    } else if self.workspace.is_some() {
-                        " ↑↓ Navigate   Esc Back to workspace   q Quit"
-                    } else {
-                        " ↑↓ Navigate   q Quit"
-                    },
-                    Style::default().fg(MUTED),
-                ),
-            ]),
+            Paragraph::new(vec![shortcut_line(&actions), shortcut_line(&navigation)]),
             rows[3],
         );
         if self.details {
