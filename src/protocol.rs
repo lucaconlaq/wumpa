@@ -17,6 +17,10 @@ pub const MAX_MESSAGE: u64 = 1024 * 1024;
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Request {
     List,
+    /// Read the activity cache only; no Git discovery or agent control.
+    SessionStatus {
+        version: u32,
+    },
     Add {
         url: String,
     },
@@ -32,6 +36,13 @@ pub enum Request {
         folder_name: Option<String>,
         agent_socket: Option<PathBuf>,
     },
+}
+
+/// Version of the optional read-only activity refresh contract.
+pub const SESSION_STATUS_VERSION: u32 = 1;
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Version of the session-aware helper/daemon contract, separate from metadata.
@@ -80,6 +91,9 @@ pub struct Response {
     /// Remote-safe agent metadata; absent means an older daemon lacks discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<crate::session_runtime::RemoteSnapshot>,
+    /// Optional capability: old servers are never sent new refresh requests.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sessions_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight: Option<Preflight>,
 }

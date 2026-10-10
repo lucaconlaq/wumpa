@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -125,6 +126,9 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
     }
     let cloning = Arc::new(Mutex::new(()));
     let active = Arc::new(AtomicUsize::new(0));
+    // Display aliases are refreshed by full metadata requests. Activity-only
+    // requests never canonicalize repository paths or run Git.
+    let checkout_aliases = Arc::new(Mutex::new(BTreeMap::<PathBuf, PathBuf>::new()));
     listener.set_nonblocking(true)?;
     #[cfg(unix)]
     let mut failing_since = None;
@@ -163,6 +167,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
         let cloning = cloning.clone();
         let path = path.clone();
         let sessions = control.session_snapshot_reader();
+        let checkout_aliases = checkout_aliases.clone();
         let control_socket = control_socket.clone();
         std::thread::Builder::new()
             .name("request".into())
@@ -182,6 +187,27 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                         deadline: Instant::now() + Duration::from_secs(5),
                     };
                     let request = read_message::<Request>(reader);
+                    if let Ok(Request::SessionStatus { version }) = &request {
+                        let mut response = Response {
+                            sessions_updates: true,
+                            ..Default::default()
+                        };
+                        if *version != crate::protocol::SESSION_STATUS_VERSION {
+                            response.error = Some("incompatible activity refresh protocol".into());
+                        } else {
+                            let mut current = sessions().remote();
+                            if let Ok(aliases) = checkout_aliases.lock() {
+                                for agent in &mut current.sessions {
+                                    if let Some(path) = aliases.get(&agent.checkout) {
+                                        agent.checkout = path.clone();
+                                    }
+                                }
+                            }
+                            current.limit();
+                            response.sessions = Some(current);
+                        }
+                        return write_message(&response, &mut stream);
+                    }
                     let preflight = matches!(
                         &request,
                         Ok(Request::PrepareClone { .. } | Request::Clone { .. })
@@ -207,6 +233,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                             .collect(),
                         error,
                         sessions: None,
+                        sessions_updates: true,
                         worktrees: Vec::new(),
                         preflight: preflight.then_some(crate::protocol::Preflight {
                             version: crate::protocol::HELPER_VERSION,
@@ -215,22 +242,28 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                     };
                     drop(config);
                     response.worktrees = crate::worktrees::discover(&response.checkouts);
+                    let mut aliases = BTreeMap::new();
+                    for path in response
+                        .checkouts
+                        .iter()
+                        .filter_map(|repository| repository.checkout_path.as_ref())
+                    {
+                        if let Ok(canonical) = path.canonicalize() {
+                            // Preserve the first configured alias, as before.
+                            aliases.entry(canonical).or_insert_with(|| path.clone());
+                        }
+                    }
                     response.sessions = Some(sessions().remote());
                     if let Some(snapshot) = response.sessions.as_mut() {
                         for agent in &mut snapshot.sessions {
-                            if let Some(path) = response
-                                .checkouts
-                                .iter()
-                                .filter_map(|repository| repository.checkout_path.as_ref())
-                                .find(|path| {
-                                    path.canonicalize()
-                                        .is_ok_and(|canonical| canonical == agent.checkout)
-                                })
-                            {
+                            if let Some(path) = aliases.get(&agent.checkout) {
                                 agent.checkout = path.clone();
                             }
                         }
                         snapshot.limit();
+                    }
+                    if let Ok(mut cached) = checkout_aliases.lock() {
+                        *cached = aliases;
                     }
                     write_message(&response, &mut stream)
                 })();

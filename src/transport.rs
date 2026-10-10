@@ -39,6 +39,8 @@ pub fn cancellable_request(
     let cloning = matches!(request, Request::Clone { .. });
     let timeout = if cloning {
         protocol::CLONE_TIMEOUT + Duration::from_secs(10)
+    } else if matches!(request, Request::SessionStatus { .. }) {
+        Duration::from_secs(5)
     } else {
         Duration::from_secs(20)
     };
@@ -65,6 +67,11 @@ pub fn cancellable_request(
             }
             crate::repository::folder_name(url, folder_name.as_deref())?;
         }
+        Request::SessionStatus { version } => {
+            if *version != protocol::SESSION_STATUS_VERSION {
+                return Err("incompatible activity refresh protocol".into());
+            }
+        }
         Request::List => {}
     }
     let response: Response = match connection {
@@ -74,7 +81,7 @@ pub fn cancellable_request(
             stream.set_read_timeout(Some(Duration::from_millis(100)))?;
             stream.set_write_timeout(Some(Duration::from_secs(2)))?;
             protocol::write_message(request, &mut stream)?;
-            let deadline = if cloning {
+            let deadline = if cloning || matches!(request, Request::SessionStatus { .. }) {
                 deadline
             } else {
                 Instant::now() + Duration::from_secs(10)

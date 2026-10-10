@@ -53,7 +53,9 @@ pub fn error(message: impl std::fmt::Display) {
 pub fn clean(value: &str) -> String {
     let mut result = String::new();
     for c in value.chars() {
-        if c.is_control() {
+        if c.is_control()
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
             result.extend(c.escape_default());
         } else {
             result.push(c);
@@ -70,5 +72,9 @@ mod tests {
     fn escapes_terminal_controls_without_changing_unicode() {
         assert_eq!(clean("é\u{1b}[2J\n\r\u{7}"), "é\\u{1b}[2J\\n\\r\\u{7}");
         assert!(!clean("\u{9b}31m").chars().any(char::is_control));
+        assert_eq!(
+            clean("name\u{2028}\u{2029}\u{202e}\u{2066}"),
+            "name\\u{2028}\\u{2029}\\u{202e}\\u{2066}"
+        );
     }
 }

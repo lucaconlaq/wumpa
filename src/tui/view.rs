@@ -174,6 +174,11 @@ impl App {
                 );
             } else {
                 let checkout_rows = self.dashboard_rows();
+                let display_ids = self
+                    .sessions
+                    .as_ref()
+                    .map(crate::session_runtime::RemoteSnapshot::display_ids)
+                    .unwrap_or_default();
                 let items: Vec<_> = checkout_rows
                     .iter()
                     .copied()
@@ -194,14 +199,18 @@ impl App {
                                             }
                                     },
                                 );
-                                let id: String = agent.id.clone().into();
+                                let full_id: String = agent.id.clone().into();
+                                let id = display_ids
+                                    .get(&full_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(&full_id);
                                 format!(
-                                    "{}{} 🤖 {} · {} · {:?}",
+                                    "{}{} 🤖 {} · {} · {}",
                                     if worktree.is_some() { "     " } else { "   " },
                                     if next_sibling { "├" } else { "└" },
-                                    clean(&agent.label),
+                                    clean(agent.display_name()),
                                     id,
-                                    agent.state
+                                    agent.display_state()
                                 )
                             } else if let Some(worktree) = worktree {
                                 let name = display_path(&worktree.path, self.home_dir.as_deref());

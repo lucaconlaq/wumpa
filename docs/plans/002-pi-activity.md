@@ -2,9 +2,56 @@
 
 ## Status
 
-Planned; not implemented. The earlier socket-path plumbing prototype is reverted
-in favor of implementing the complete integration described here. No deployment
-or release changes are included.
+Implementation complete (steps 1–6), with the acceptance limitations below.
+The bundled [`agent-extensions/pi.ts`](../../agent-extensions/pi.ts) and
+[`integration documentation`](../../agent-extensions/README.md) cover Pi 1.0.4,
+private publication, naming precedence, opt-in configuration, upgrades, and
+troubleshooting. No deployment or release changes are included.
+
+Wumpa embeds/materializes runner-owned private source copies, injects literal Pi
+flags and authoritative per-child environment, and preserves source through reloads
+and daemon restarts. Explicit names/existing conversation selections take
+precedence. Materialization/reporting failures never prevent ordinary launch.
+
+`src/agent_activity.rs` implements authenticated bounded subscriptions, LF framing,
+strict version/ID/generation/sequence validation, replay rejection, reconnects,
+15-second monotonic freshness, and cached-name semantics outside manager/Git locks.
+Verified runner completion retires missing recovery identities; discovery failures
+invalidate freshness without discarding them. Worker replacements retire before
+spawning, keeping the 64-worker bound true during descriptor changes.
+
+Remote-safe optional summaries expose current Pi identity/name and activity.
+Dashboard/plain rows use current names, unique short Wumpa ID prefixes, and Running/Waiting
+for input/Unknown labels while preserving explicit process lifecycle states.
+Controls/bidi/separators are escaped. A capability-gated, cache-only versioned
+refresh updates the open dashboard about once a second plus transport time, without
+Git, form/details/status resets, or attachment identity changes. Old clients,
+servers, recovery records, disabled integration, and non-Pi agents remain usable.
+
+Validation includes 198 Rust tests (latest serialized run), 18 Node tests,
+formatting, strict Clippy, Rust 1.85 Linux/Apple checks, and strict TypeScript 5.8.3
+checking against Pi 1.0.4 declarations. Real interactive Pi tests cover resource
+discovery, initial/changed names, reload/new/clone, and prompts/tools/retry/queued
+follow-up/cancellation/manual compaction against a deterministic loopback model
+double. The binary-to-Pi test verifies embedding, restart survival, remote status
+projection, stable IDs, name-clear on new conversation, and rename-to-server-cache
+latency below three seconds. A TCP-driven TUI test verifies cache-to-row updates,
+selection/details preservation, escaping, stale/failed refreshes, and old-server
+capability gating. Display-prefix tests cover cross-checkout collisions, minimal
+lengths, near-identical full IDs, reordering, and unchanged full-ID attachment.
+Socket doubles cover deadlines, actual heartbeat expiry,
+malformed/rate-limited peers, replay/reconnect, replacement/security, and completion.
+
+Unverified acceptance checks: actual external model-provider behavior; persisted
+named resume and interactive resume/fork selectors; branch summaries and approval
+dialogs; abrupt real-Pi exit; and combined Pi-to-dashboard latency on a real SSH
+connection. Native macOS runtime tests were not run; agent execution remains
+unsupported there. These limits are not claimed as verified by socket/model doubles.
+
+Rust 1.99.0, Node 24.21.0, a Nix GCC wrapper, and an isolated temporary TypeScript
+compiler cache were used; project dependencies are unchanged. `nix develop` is
+unavailable because this checkout has no flake. Integration startup/reload is silent;
+existing live agents retain their original source until relaunched.
 
 ## Goal and constraints
 
@@ -117,9 +164,9 @@ reconciliation complement events, rather than replacing them.
   This makes the initial dashboard name and Pi session name identical. Do not
   overwrite an existing name when configured arguments resume/continue a Pi
   conversation or explicitly supply a name; establish and test argument precedence.
-  For an unnamed resumed conversation, the extension may initialize the name from
-  the Wumpa label once. Never reinitialize it on `/reload`, `/name`, or later session
-  switches. Pi's name becomes authoritative after initialization.
+  Leave an unnamed resumed conversation unnamed. The extension never initializes
+  names and never resets them on `/reload`, `/name`, or later session switches.
+  Pi's name becomes authoritative after launch initialization.
 - Inject `WUMPA_ACTIVITY_SOCKET` and a Wumpa session identifier into the individual
   Pi child environment after existing environment preparation. Do not use a shell
   wrapper or mutate the service or tmux server environment.
@@ -230,12 +277,15 @@ Initial and subsequent full snapshots:
 - Render agent rows in the requested form:
 
   ```text
-  🤖 Fix authentication · 326bc28613ffc9df3477946c60b9b462 · Running
+  🤖 Fix authentication · 326bc · Running
   ```
 
   The name is Pi's current session name, initially seeded from the Wumpa agent
-  session label for a new conversation. The full ID is the stable Wumpa session
-  ID, not Pi's conversation ID. Map activity `Working` to display text `Running`,
+  session label for a new conversation. Display the shortest server-wide unique
+  prefix of the stable Wumpa session ID, starting at five hex characters, not Pi's
+  conversation ID. Prefixes may expand/shrink as peers change. Keep full IDs in
+  metadata, selection, attachment, and recovery; never resolve control targets
+  from a display prefix. Map activity `Working` to display text `Running`,
   `WaitingForInput` to `Waiting for input`, and unavailable activity to `Unknown`;
   retain explicit lifecycle states for starting/stopping/cleanup failures.
 - Reflect `/name` changes in the same row as soon as the update reaches the client.
@@ -255,6 +305,23 @@ Initial and subsequent full snapshots:
   real-time delivery until the client path is tested.
 
 ## Implementation steps
+
+The extension-side contract is now documented in `agent-extensions/README.md`, including
+exact bounds, exclusive socket publication, remaining stale-resource cleanup,
+configuration/name precedence, and tested API timing. Embedding, private source
+publication, opt-in launch arguments/environment, runner lifetime, and compatible
+local recovery association are implemented. Unit/launch tests cover permissions,
+concurrent creation, symlinks, distinct agents/instances, caller spoofing, naming
+precedence, long-path fallback, daemon restart retention, and verified cleanup.
+Bounded subscriptions/cache, remote-safe summaries, dashboard/plain rendering,
+capability-gated cache-only refresh, and troubleshooting are also implemented.
+An optional real Pi binary-launch test covers initial name, `/name`, `/reload`,
+`/new`, normal resource discovery, daemon restart while Pi survives, remote cache
+updates and stable IDs, and source cleanup. The loopback-model PTY test covers
+actual Pi session-level workflows without external credentials.
+
+All implementation steps are complete; unverified acceptance checks remain listed
+in Status above.
 
 1. Verify the supported Pi API/version and finalize config, lifecycle, and wire
    contracts. Re-read Pi extension docs and linked examples before implementation.

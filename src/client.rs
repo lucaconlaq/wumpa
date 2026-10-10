@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{self, BufRead, Write},
     sync::{
         Arc,
@@ -85,6 +86,11 @@ fn new_server(input: &Input) -> Result<Option<Server>> {
 }
 
 fn show_repositories(response: &Response) {
+    let display_ids = response
+        .sessions
+        .as_ref()
+        .map(crate::session_runtime::RemoteSnapshot::display_ids)
+        .unwrap_or_default();
     println!("\nRepositories:");
     if let Some(root) = &response.repository_dir {
         crate::output::info("Server root", root.display());
@@ -108,7 +114,7 @@ fn show_repositories(response: &Response) {
             None => println!("     Saved — not cloned"),
         }
         if let Some(path) = &entry.checkout_path {
-            show_agents(response, path, "     ");
+            show_agents(response, path, "     ", &display_ids);
         }
         if let Some(group) = response
             .worktrees
@@ -130,7 +136,7 @@ fn show_repositories(response: &Response) {
                             if worktree.prunable { " [prunable]" } else { "" }
                         ),
                     );
-                    show_agents(response, &worktree.path, "       ");
+                    show_agents(response, &worktree.path, "       ", &display_ids);
                 }
             }
             if let Some(error) = &group.error {
@@ -140,16 +146,25 @@ fn show_repositories(response: &Response) {
     }
 }
 
-fn show_agents(response: &Response, checkout: &std::path::Path, indent: &str) {
+fn show_agents(
+    response: &Response,
+    checkout: &std::path::Path,
+    indent: &str,
+    display_ids: &BTreeMap<String, String>,
+) {
     if let Some(snapshot) = &response.sessions {
         for agent in &snapshot.sessions {
             if agent.checkout == checkout {
-                let id: String = agent.id.clone().into();
+                let full_id: String = agent.id.clone().into();
+                let id = display_ids
+                    .get(&full_id)
+                    .map(String::as_str)
+                    .unwrap_or(&full_id);
                 println!(
-                    "{indent}└ 🤖 {} · {} · {:?}",
-                    crate::output::clean(&agent.label),
+                    "{indent}└ 🤖 {} · {} · {}",
+                    crate::output::clean(agent.display_name()),
                     id,
-                    agent.state
+                    agent.display_state()
                 );
             }
         }

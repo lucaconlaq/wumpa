@@ -18,7 +18,9 @@ pub fn validate_path(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use unix::{Exchange, cleanup_socket, verify_peer};
+pub(crate) use unix::{
+    Exchange, activity_connection, cleanup_socket, verify_activity_endpoint, verify_peer,
+};
 #[cfg(unix)]
 pub use unix::{Listener, handshake, preflight, sessions, tracked_folders};
 #[cfg(unix)]
@@ -566,6 +568,43 @@ mod unix {
         Ok(stream)
     }
 
+    /// Connect without blocking on a full backlog and verify both namespace
+    /// identity and peer UID. Never reclaim or modify an activity endpoint.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn activity_connection(path: &Path) -> Result<(UnixStream, File, Metadata)> {
+        if canonical_path(path)? != path {
+            return Err("activity endpoint must be canonical".into());
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path.parent().ok_or("missing activity parent")?)?;
+        owned_mode(&directory.metadata()?, user(), 0o700)?;
+        let identity = socket_metadata(path)?;
+        let stream = connect(path, Duration::from_millis(250))?;
+        peer(&stream)?;
+        verify_activity_endpoint(path, &directory, &identity)?;
+        Ok((stream, directory, identity))
+    }
+
+    /// Pin directory identity across reads and invalidate replaced listeners.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_activity_endpoint(
+        path: &Path,
+        directory: &File,
+        identity: &Metadata,
+    ) -> Result<()> {
+        let parent = fs::symlink_metadata(path.parent().ok_or("missing activity parent")?)?;
+        owned_mode(&parent, user(), 0o700)?;
+        if !parent.is_dir()
+            || !same_identity(&parent, &directory.metadata()?)
+            || !same_identity(identity, &socket_metadata(path)?)
+        {
+            return Err("activity namespace changed".into());
+        }
+        Ok(())
+    }
+
     fn peer(stream: &UnixStream) -> Result<()> {
         #[cfg(target_os = "linux")]
         let uid = {
@@ -890,6 +929,8 @@ mod unix {
         worker: Option<JoinHandle<io::Result<()>>>,
         manager: Arc<Mutex<Option<crate::session_runtime::Manager>>>,
         snapshot: Arc<Mutex<crate::session_runtime::Snapshot>>,
+        #[cfg(target_os = "linux")]
+        activity: Arc<crate::agent_activity::Hub>,
     }
 
     impl Listener {
@@ -937,6 +978,8 @@ mod unix {
             let listener = UnixListener::bind(&path)?;
             let identity = fs::symlink_metadata(&path)?;
             let stop = Arc::new(AtomicBool::new(false));
+            #[cfg(target_os = "linux")]
+            let activity = Arc::new(crate::agent_activity::Hub::new(&path));
             let mut owned = Self {
                 path,
                 identity,
@@ -949,6 +992,8 @@ mod unix {
                     supported: cfg!(target_os = "linux"),
                     ..Default::default()
                 })),
+                #[cfg(target_os = "linux")]
+                activity,
             };
             fs::set_permissions(&owned.path, fs::Permissions::from_mode(0o600))?;
             socket_metadata(&owned.path)?;
@@ -961,6 +1006,8 @@ mod unix {
             let stopping = owned.stop.clone();
             let manager = owned.manager.clone();
             let snapshot = owned.snapshot.clone();
+            #[cfg(target_os = "linux")]
+            let activity = owned.activity.clone();
             owned.worker = Some(
                 thread::Builder::new()
                     .name("control-listener".into())
@@ -970,6 +1017,7 @@ mod unix {
                         let mut failing_since = None;
                         while !stopping.load(Ordering::Relaxed) {
                             if cfg!(target_os = "linux") && Instant::now() >= next_refresh {
+                                let mut refreshed = None;
                                 if let Ok(mut state) = manager.try_lock() {
                                     // Restart discovery does not require a dashboard or a new launch.
                                     if state.is_none() {
@@ -977,7 +1025,8 @@ mod unix {
                                         if state.is_none() {
                                             if let Ok(mut current) = snapshot.lock() {
                                                 *current = crate::session_runtime::Snapshot { sessions: Vec::new(), supported: false,
-                                                    error: Some("Agent runtime ownership/storage unavailable".into()) };
+                                                    error: Some("Agent runtime ownership/storage unavailable".into()), ..Default::default() };
+                                                refreshed = Some(current.clone());
                                             }
                                         }
                                     }
@@ -986,9 +1035,18 @@ mod unix {
                                             state.snapshot(Instant::now() + Duration::from_secs(2));
                                         if let Ok(mut current) = snapshot.lock() {
                                             *current = value;
+                                            refreshed = Some(current.clone());
                                         }
                                     }
                                 }
+                                // Never connect/subscribe or join activity workers
+                                // while holding the manager's reconciliation lock.
+                                #[cfg(target_os = "linux")]
+                                if let Some(value) = refreshed {
+                                    activity.reconcile(&value);
+                                }
+                                #[cfg(not(target_os = "linux"))]
+                                let _ = refreshed;
                                 next_refresh = Instant::now() + Duration::from_millis(500);
                             }
                             match listener.accept() {
@@ -1043,15 +1101,26 @@ mod unix {
             &self,
         ) -> impl Fn() -> crate::session_runtime::Snapshot + Send + 'static {
             let snapshot = self.snapshot.clone();
+            #[cfg(target_os = "linux")]
+            let activity = self.activity.clone();
             move || {
-                snapshot
+                let value = snapshot
                     .lock()
                     .map(|snapshot| snapshot.clone())
                     .unwrap_or_else(|_| crate::session_runtime::Snapshot {
                         supported: cfg!(target_os = "linux"),
                         error: Some("Agent snapshot lock unavailable".into()),
                         sessions: Vec::new(),
-                    })
+                        ..Default::default()
+                    });
+                #[cfg(target_os = "linux")]
+                {
+                    let mut value = value;
+                    activity.apply(&mut value);
+                    value
+                }
+                #[cfg(not(target_os = "linux"))]
+                value
             }
         }
 

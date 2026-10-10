@@ -7,7 +7,7 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -143,6 +143,10 @@ struct App {
     zed_launch: Option<zed::Launch>,
     ssh_command: Option<std::process::Command>,
     job: Option<Job>,
+    sessions_job: Option<Job>,
+    sessions_updates: bool,
+    next_sessions_refresh: Instant,
+    sessions_received: Option<Instant>,
     status: String,
     error: bool,
     tick: usize,
@@ -173,6 +177,10 @@ impl App {
             zed_launch: None,
             ssh_command: None,
             job: None,
+            sessions_job: None,
+            sessions_updates: false,
+            next_sessions_refresh: Instant::now(),
+            sessions_received: None,
             status: "Welcome. Select a server and press Enter, or press n to add one.".into(),
             error: false,
             tick: 0,
@@ -187,6 +195,7 @@ impl App {
 
     fn open_workspace(&mut self, target: usize) {
         self.job = None;
+        self.sessions_job = None;
         self.workspace = Some(target);
         self.servers.select(Some(target));
         self.pane = Pane::Repositories;
@@ -195,6 +204,8 @@ impl App {
             self.repositories.clear();
             self.worktrees.clear();
             self.sessions = None;
+            self.sessions_updates = false;
+            self.sessions_received = None;
             self.repository_dir = None;
             self.home_dir = None;
             self.repos.select(None);
@@ -204,6 +215,7 @@ impl App {
 
     fn switch_servers(&mut self) {
         self.job = None;
+        self.sessions_job = None;
         self.details = false;
         self.zed_launch = None;
         self.pane = Pane::Servers;
@@ -218,6 +230,7 @@ impl App {
         if self.job.is_some() {
             return;
         }
+        self.sessions_job = None;
         self.details = false;
         self.zed_launch = None;
         let cloning = matches!(request, Request::Clone { .. });
@@ -246,6 +259,7 @@ impl App {
     }
 
     fn poll(&mut self) {
+        self.poll_sessions();
         self.tick = self.tick.wrapping_add(1);
         if let Some(result) = self.zed_launch.as_mut().and_then(zed::Launch::poll) {
             self.zed_launch = None;
@@ -282,7 +296,14 @@ impl App {
                 });
                 self.repositories = response.repository_entries();
                 self.worktrees = response.worktrees;
-                self.sessions = response.sessions;
+                self.sessions_updates = response.sessions_updates;
+                self.sessions_received = Some(Instant::now());
+                self.next_sessions_refresh = Instant::now() + Duration::from_secs(1);
+                if let Some(snapshot) = response.sessions {
+                    self.update_sessions(snapshot);
+                } else {
+                    self.sessions = None;
+                }
                 self.repository_dir = response.repository_dir;
                 self.home_dir = response.home_dir;
                 let selected = if self.repositories.is_empty() {
@@ -318,10 +339,154 @@ impl App {
                 }
             }
             Err(error) => {
+                if let Some(snapshot) = &mut self.sessions {
+                    snapshot.invalidate_activity();
+                }
                 self.status = error;
                 self.error = true;
             }
         }
+    }
+
+    // Activity refresh is a separate bounded, cancellable job. It never changes
+    // the current form/details/status/pane or triggers repository discovery.
+    fn poll_sessions(&mut self) {
+        if self
+            .sessions_received
+            .is_some_and(|received| received.elapsed() >= Duration::from_secs(15))
+        {
+            if let Some(snapshot) = &mut self.sessions {
+                snapshot.invalidate_activity();
+            }
+        }
+        let result = self
+            .sessions_job
+            .as_ref()
+            .and_then(|job| match job.receiver.try_recv() {
+                Ok(result) => Some((job.target, result)),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some((job.target, Err("activity refresh worker stopped".into())))
+                }
+            });
+        if let Some((target, result)) = result {
+            self.sessions_job = None;
+            self.next_sessions_refresh =
+                Instant::now() + Duration::from_secs(if result.is_ok() { 1 } else { 5 });
+            if self.connected == Some(target) && self.workspace == Some(target) {
+                match result {
+                    Ok(response) if response.sessions_updates => {
+                        if let Some(snapshot) = response.sessions {
+                            self.update_sessions(snapshot);
+                            self.sessions_received = Some(Instant::now());
+                        } else {
+                            self.sessions_updates = false;
+                            if let Some(snapshot) = &mut self.sessions {
+                                snapshot.invalidate_activity();
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        self.sessions_updates = false;
+                        if let Some(snapshot) = &mut self.sessions {
+                            snapshot.invalidate_activity();
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(snapshot) = &mut self.sessions {
+                            snapshot.invalidate_activity();
+                        }
+                    }
+                }
+            }
+        }
+        if self.sessions_job.is_some()
+            || self.job.is_some()
+            || !self.sessions_updates
+            || self.pane != Pane::Repositories
+            || self.form.is_some()
+            || self.remove_target.is_some()
+            || self.ssh_command.is_some()
+            || self.zed_launch.is_some()
+            || Instant::now() < self.next_sessions_refresh
+        {
+            return;
+        }
+        let Some(target) = self
+            .connected
+            .filter(|target| self.workspace == Some(*target))
+        else {
+            return;
+        };
+        let Some(server) = self.config.servers.get(target) else {
+            return;
+        };
+        let connection = server.connection.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stopping = cancelled.clone();
+        let (sender, receiver) = mpsc::channel();
+        if let Ok(thread) = thread::Builder::new()
+            .name("dashboard-activity".into())
+            .spawn(move || {
+                let result = transport::cancellable_request(
+                    &connection,
+                    &Request::SessionStatus {
+                        version: crate::protocol::SESSION_STATUS_VERSION,
+                    },
+                    &stopping,
+                )
+                .map_err(|error| error.to_string());
+                let _ = sender.send(result);
+            })
+        {
+            self.sessions_job = Some(Job {
+                target,
+                cloning: false,
+                receiver,
+                cancelled,
+                thread: Some(thread),
+            });
+        } else {
+            self.next_sessions_refresh = Instant::now() + Duration::from_secs(5);
+        }
+    }
+
+    fn update_sessions(&mut self, mut snapshot: crate::session_runtime::RemoteSnapshot) {
+        if snapshot.error.is_some() || !snapshot.supported {
+            if let Some(previous) = &mut self.sessions {
+                previous.error = snapshot.error;
+                previous.supported = snapshot.supported;
+                previous.invalidate_activity();
+                return;
+            }
+        }
+        let previous_agent = self.selected_agent().map(|agent| agent.id.clone());
+        let previous_checkout = self
+            .selected_checkout()
+            .map(|(repo, tree)| (repo.url.clone(), tree.map(|tree| tree.path.clone())));
+        if let Some(previous) = &self.sessions {
+            snapshot.retain_cached_names(previous);
+        }
+        self.sessions = Some(snapshot);
+        let rows = self.dashboard_rows();
+        let matches_checkout = |index: usize, tree: Option<&crate::worktrees::Worktree>| {
+            previous_checkout.as_ref().is_some_and(|(url, path)| {
+                self.repositories[index].url == *url && tree.map(|tree| &tree.path) == path.as_ref()
+            })
+        };
+        let selected = rows
+            .iter()
+            .position(|(index, tree, agent)| {
+                matches_checkout(*index, *tree)
+                    && agent.map(|agent| &agent.id) == previous_agent.as_ref()
+            })
+            .or_else(|| {
+                rows.iter().position(|(index, tree, agent)| {
+                    matches_checkout(*index, *tree) && agent.is_none()
+                })
+            })
+            .or((!rows.is_empty()).then_some(0));
+        self.repos.select(selected);
     }
 
     fn paste(&mut self, text: &str) {
@@ -513,6 +678,7 @@ impl App {
     }
 
     fn attach_agent(&mut self) {
+        self.sessions_job = None;
         let result = (|| {
             let agent = self.selected_agent().ok_or("Select an agent first.")?;
             let (connection, _) = self.checkout_target()?;
@@ -531,6 +697,7 @@ impl App {
     }
 
     fn open_ssh(&mut self) {
+        self.sessions_job = None;
         if self.selected_agent().is_some() {
             return;
         }
@@ -1265,13 +1432,16 @@ mod tests {
             checkout_path: Some("/repo".into()),
         }];
         let first = Summary {
-            id: SessionId::try_from("a".repeat(32)).unwrap(),
+            id: SessionId::try_from(format!("abcde0{}", "a".repeat(26))).unwrap(),
             checkout: "/repo".into(),
             label: "pi".into(),
             state: State::Running,
+            activity: crate::agent_activity::Activity::Unknown,
+            pi_session_name: None,
+            pi_session_id: None,
         };
         let second = Summary {
-            id: SessionId::try_from("b".repeat(32)).unwrap(),
+            id: SessionId::try_from(format!("abcde1{}", "b".repeat(26))).unwrap(),
             ..first.clone()
         };
         app.sessions = Some(RemoteSnapshot {
@@ -1285,6 +1455,8 @@ mod tests {
         assert_eq!(app.selected_agent().unwrap().id, first.id);
         let text = screen(&mut app, 100, 30);
         assert!(text.contains("Attach"));
+        assert!(text.contains("· abcde · Unknown"));
+        assert!(!text.contains(&String::from(first.id.clone())));
         assert!(!text.contains(" t  SSH"));
         app.key(key(KeyCode::Char('t')));
         assert!(app.ssh_command.is_none());
@@ -1294,7 +1466,7 @@ mod tests {
             command.get_args().last().unwrap().to_str().unwrap(),
             format!(
                 "cd '/repo' && exec wumpa agent-attach --port 7432 --session {}",
-                "a".repeat(32)
+                String::from(first.id.clone())
             )
         );
         app.details = true;
@@ -1321,9 +1493,116 @@ mod tests {
         );
         assert_eq!(app.repos.selected(), Some(2));
         assert_eq!(app.selected_agent().unwrap().id, first.id);
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("· abcde0 · Unknown"));
+        assert!(text.contains("· abcde1 · Unknown"));
+        assert!(!text.contains(&String::from(first.id.clone())));
         assert_eq!(app.zed_target().unwrap(), "ssh://dev-host/repo");
         app.sessions.as_mut().unwrap().error = Some("discovery timed out".into());
         assert!(screen(&mut app, 100, 30).contains("Agents unavailable"));
+    }
+
+    #[test]
+    fn activity_refresh_updates_rows_promptly_without_disrupting_selection_or_details() {
+        use crate::{
+            agent_activity::Activity,
+            session_runtime::{RemoteSnapshot, Summary},
+            sessions::{SessionId, State},
+        };
+        use std::net::{Ipv4Addr, TcpListener};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = removal_app(dir.path().join("client.json"));
+        app.config.servers[1].connection = Connection::Local {
+            port: listener.local_addr().unwrap().port(),
+        };
+        app.pane = Pane::Repositories;
+        app.repositories = vec![Repository {
+            url: "ssh://host/app.git".into(),
+            checkout_path: Some("/repo".into()),
+        }];
+        let agent = Summary {
+            id: SessionId::try_from("a".repeat(32)).unwrap(),
+            checkout: "/repo".into(),
+            label: "original".into(),
+            state: State::Running,
+            activity: Activity::Working,
+            pi_session_name: Some("First name".into()),
+            pi_session_id: Some("conversation".into()),
+        };
+        app.sessions = Some(RemoteSnapshot {
+            sessions: vec![agent.clone()],
+            supported: true,
+            error: None,
+        });
+        app.sessions_updates = true;
+        app.sessions_received = Some(Instant::now());
+        app.next_sessions_refresh = Instant::now();
+        app.repos.select(Some(1));
+        app.details = true;
+        app.status = "Do not replace this message".into();
+        let mut next = agent.clone();
+        next.pi_session_name = Some("Renamed\u{1b}[2J\u{2028}".into());
+        next.activity = Activity::WaitingForInput;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            assert!(matches!(
+                crate::protocol::read_message::<Request>(&mut stream).unwrap(),
+                Request::SessionStatus { version: 1 }
+            ));
+            crate::protocol::write_message(
+                &Response {
+                    sessions_updates: true,
+                    sessions: Some(RemoteSnapshot {
+                        sessions: vec![next],
+                        supported: true,
+                        error: None,
+                    }),
+                    ..Default::default()
+                },
+                &mut stream,
+            )
+            .unwrap();
+        });
+        let started = Instant::now();
+        while app.selected_agent().unwrap().activity != Activity::WaitingForInput {
+            app.poll();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            thread::sleep(Duration::from_millis(10));
+        }
+        server.join().unwrap();
+        assert!(app.details);
+        assert_eq!(app.selected_agent().unwrap().id, agent.id);
+        assert_eq!(app.status, "Do not replace this message");
+        app.details = false;
+        let screen = screen(&mut app, 130, 30);
+        assert!(screen.contains("Renamed\\u{1b}[2J\\u{2028}"));
+        assert!(screen.contains("Waiting for input"));
+        assert!(screen.contains("· aaaaa · Waiting for input"));
+        assert!(!screen.contains(&"a".repeat(32)));
+        app.update_sessions(RemoteSnapshot {
+            supported: true,
+            error: Some("temporary failure".into()),
+            sessions: Vec::new(),
+        });
+        assert_eq!(app.selected_agent().unwrap().activity, Activity::Unknown);
+        assert!(
+            app.selected_agent()
+                .unwrap()
+                .display_name()
+                .starts_with("Renamed")
+        );
+        app.sessions_received = Some(Instant::now() - Duration::from_secs(16));
+        app.next_sessions_refresh = Instant::now() + Duration::from_secs(60);
+        app.poll();
+        assert_eq!(app.selected_agent().unwrap().activity, Activity::Unknown);
+        app.sessions_updates = false;
+        app.next_sessions_refresh = Instant::now();
+        app.poll();
+        assert!(app.sessions_job.is_none()); // No new requests to old servers.
     }
 
     #[test]

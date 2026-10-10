@@ -129,12 +129,24 @@ impl From<AgentCommand> for Vec<String> {
     }
 }
 
+/// Explicit agent integration; never inferred from an executable basename.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentIntegration {
+    #[default]
+    Disabled,
+    Pi,
+}
+
 /// Server-owned storage settings, agent launch settings, and repository metadata.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Applied only to new agents; older configurations default to `["pi"]`.
     #[serde(default)]
     pub agent_command: AgentCommand,
+    /// Opt-in Pi flags and embedded extension for newly launched agents only.
+    #[serde(default)]
+    pub agent_integration: AgentIntegration,
     /// Resolved and persisted at startup; absent in legacy configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_dir: Option<PathBuf>,
@@ -344,6 +356,27 @@ mod tests {
         assert_eq!(loaded.agent_command, config.agent_command);
         let saved = serde_json::to_value(&loaded).unwrap();
         assert_eq!(saved["agent_command"], serde_json::json!(arguments));
+    }
+
+    #[test]
+    fn pi_integration_is_explicit_and_disabled_for_legacy_settings() {
+        let legacy: ServerConfig = serde_json::from_str(r#"{"repositories":[]}"#).unwrap();
+        assert_eq!(legacy.agent_integration, AgentIntegration::Disabled);
+        let enabled: ServerConfig = serde_json::from_str(
+            r#"{"repositories":[],"agent_integration":"pi","agent_command":["wrapper"]}"#,
+        )
+        .unwrap();
+        assert_eq!(enabled.agent_integration, AgentIntegration::Pi);
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["agent_integration"],
+            "pi"
+        );
+        assert!(
+            serde_json::from_str::<ServerConfig>(
+                r#"{"repositories":[],"agent_integration":"auto"}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

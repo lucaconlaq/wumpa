@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    net::{Ipv4Addr, TcpListener},
+    net::{Ipv4Addr, TcpListener, TcpStream},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixStream,
@@ -109,6 +109,32 @@ impl Fixture {
         });
         child
     }
+    fn restart(&mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+        self.child = Self::start(self.dir.path(), &self.socket);
+        self.run = request(&self.socket, json!({"action":"handshake", "version":1}))["run_id"]
+            .as_str()
+            .unwrap()
+            .into();
+    }
+    fn remote(&self, value: Value) -> Value {
+        let ready: Value =
+            serde_json::from_slice(&fs::read(self.dir.path().join("ready")).unwrap()).unwrap();
+        let mut stream =
+            TcpStream::connect((Ipv4Addr::LOCALHOST, ready["port"].as_u64().unwrap() as u16))
+                .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{value}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    fn activity(&self) -> Value {
+        self.remote(json!({"action":"session_status", "version":1}))
+    }
     fn observations(&self) -> Value {
         let git_path = |flag| {
             let output = Command::new("git")
@@ -156,7 +182,10 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         // Stop owned runners before killing the isolated test server. Never touch the
         // user's tmux server, even when an assertion failed.
-        let runtime = self.dir.path().join(".c.sock.sessions");
+        let runtime = self.socket.with_file_name(format!(
+            ".{}.sessions",
+            self.socket.file_name().unwrap().to_str().unwrap(),
+        ));
         if let Ok(entries) = fs::read_dir(&runtime) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -1134,4 +1163,400 @@ fn creates_retries_recovers_and_removes_sessions_on_checkout_move() {
         .join(format!("a-{}.sock", first["session_id"].as_str().unwrap()));
     fs::rename(&fixture.repo, fixture.dir.path().join("moved-checkout")).unwrap();
     wait(|| !agent_socket.exists());
+}
+
+#[test]
+fn real_pi_uses_embedded_source_and_keeps_it_through_reload_and_daemon_restart() {
+    let Some(executable) = std::env::var_os("WUMPA_PI_TEST_EXECUTABLE") else {
+        eprintln!("Skipping optional real Pi launch test: WUMPA_PI_TEST_EXECUTABLE unset");
+        return;
+    };
+    assert!(Path::new(&executable).is_absolute());
+    let mut fixture = Fixture::new();
+    let config_path = fixture.dir.path().join("server.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["agent_command"] = json!([
+        executable.to_str().unwrap(),
+        "--offline",
+        "--no-approve",
+        "--no-mcp",
+        "--no-session"
+    ]);
+    config["agent_integration"] = json!("pi");
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let home = fixture.dir.path().join("pi-home");
+    let agent_dir = home.join("agent");
+    fs::create_dir_all(agent_dir.join("extensions")).unwrap();
+    fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"enableInstallTelemetry":false,"quietStartup":true}"#,
+    )
+    .unwrap();
+    let sentinel = fixture.repo.join("normal-extension-loaded");
+    fs::write(agent_dir.join("extensions/sentinel.ts"), format!(
+        "import {{writeFileSync}} from 'node:fs'; export default function(pi) {{ pi.on('session_start', () => writeFileSync({}, 'loaded')); }}",
+        serde_json::to_string(&sentinel).unwrap(),
+    )).unwrap();
+    fixture.restart();
+    let key = "f".repeat(32);
+    let created = fixture.operation(json!({"action":"create", "request_id":key,
+        "name":"Wumpa initial label", "observations":fixture.observations(), "environment":[
+            {"name":STANDARD.encode("PATH"), "value":STANDARD.encode(std::env::var("PATH").unwrap())},
+            {"name":STANDARD.encode("HOME"), "value":STANDARD.encode(home.as_os_str().as_encoded_bytes())},
+            {"name":STANDARD.encode("PI_CODING_AGENT_DIR"), "value":STANDARD.encode(agent_dir.as_os_str().as_encoded_bytes())}
+        ]}));
+    let id = created["session_id"].as_str().unwrap();
+    let runtime = fixture.dir.path().join(".c.sock.sessions");
+    let record: Value = serde_json::from_slice(
+        &fs::read(runtime.join(format!("{}-{key}.json", fixture.run))).unwrap(),
+    )
+    .unwrap();
+    let directory = PathBuf::from(record["pi"]["directory"].as_str().unwrap());
+    let source = directory.join("pi-v1.ts");
+    let endpoint = directory.join(format!("a-{id}.activity.sock"));
+    wait(|| endpoint.exists() && sentinel.exists());
+    let subscribe = || {
+        let mut stream = UnixStream::connect(&endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(7)))
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"type":"subscribe", "version":1, "wumpa_session_id":id})
+        )
+        .unwrap();
+        BufReader::new(stream)
+    };
+    let status = |reader: &mut BufReader<UnixStream>| {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    let mut reader = subscribe();
+    let initial = status(&mut reader);
+    assert_eq!(initial["pi_session_name"], "Wumpa initial label");
+    assert_eq!(initial["activity"], "waiting_for_input");
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        include_str!("../agent-extensions/pi.ts")
+    );
+    let target = format!("wumpa-{id}");
+    let send = |text: &str| {
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(runtime.join("tmux.sock"))
+                .args(["send-keys", "-t", &target, "-l", text])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(runtime.join("tmux.sock"))
+                .args(["send-keys", "-t", &target, "Enter"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    wait(|| fixture.activity()["sessions"]["sessions"][0]["activity"] == "waiting_for_input");
+    let full = fixture.remote(json!({"action":"list"}));
+    assert_eq!(full["sessions_updates"], true);
+    assert_eq!(full["sessions"]["sessions"][0]["id"], id);
+    assert_eq!(
+        full["sessions"]["sessions"][0]["pi_session_name"],
+        "Wumpa initial label"
+    );
+    assert!(!full.to_string().contains(directory.to_str().unwrap()));
+    assert!(!full.to_string().contains("WUMPA_ACTIVITY_SOCKET"));
+    thread::sleep(Duration::from_millis(500));
+    let renamed = Instant::now();
+    send("/name User renamed");
+    wait(|| fixture.activity()["sessions"]["sessions"][0]["pi_session_name"] == "User renamed");
+    assert!(renamed.elapsed() < Duration::from_secs(3));
+    assert_eq!(fixture.activity()["sessions"]["sessions"][0]["id"], id);
+    wait(|| status(&mut reader)["pi_session_name"] == "User renamed");
+    let before = endpoint.metadata().unwrap().ino();
+    send("/reload");
+    wait(|| {
+        endpoint
+            .metadata()
+            .is_ok_and(|metadata| metadata.ino() != before)
+    });
+    let reloaded = status(&mut subscribe());
+    assert_eq!(reloaded["pi_session_name"], "User renamed");
+    assert_ne!(reloaded["generation"], initial["generation"]);
+    assert!(source.exists());
+    fixture.restart();
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(status(&mut subscribe())["pi_session_name"], "User renamed");
+    wait(|| fixture.activity()["sessions"]["sessions"][0]["pi_session_name"] == "User renamed");
+    assert_eq!(
+        fixture.activity()["sessions"]["sessions"][0]["activity"],
+        "waiting_for_input"
+    );
+    assert!(source.exists());
+    let previous_pi_id = fixture.activity()["sessions"]["sessions"][0]["pi_session_id"].clone();
+    send("/new");
+    wait(|| {
+        let current = fixture.activity();
+        let summary = &current["sessions"]["sessions"][0];
+        summary["pi_session_id"].is_string() && summary["pi_session_id"] != previous_pi_id
+    });
+    let current = fixture.activity()["sessions"]["sessions"][0].clone();
+    assert_eq!(current["id"], id);
+    assert_eq!(current["label"], "Wumpa initial label");
+    assert!(current.get("pi_session_name").is_none());
+    assert_eq!(current["activity"], "waiting_for_input");
+    assert_eq!(
+        request(
+            &runtime.join(format!("a-{id}.sock")),
+            json!({"action":"stop", "session_id":id})
+        )["stopped"],
+        true
+    );
+    wait(|| !directory.exists());
+}
+
+#[test]
+fn activity_refresh_is_versioned_cache_only_and_disabled_agents_remain_unknown() {
+    let fixture = Fixture::new();
+    let created = fixture.create_named(&"a".repeat(32), Some("Untracked"));
+    let id = created["session_id"].as_str().unwrap();
+    wait(|| {
+        fixture.activity()["sessions"]["sessions"]
+            .as_array()
+            .is_some_and(|sessions| sessions.iter().any(|session| session["id"] == id))
+    });
+    let summary = fixture.activity()["sessions"]["sessions"][0].clone();
+    assert_eq!(summary["label"], "Untracked");
+    assert_eq!(summary["state"], "running");
+    assert!(summary.get("activity").is_none());
+    assert!(summary.get("pi_session_name").is_none());
+    assert!(summary.get("pi_session_id").is_none());
+    let refresh = fixture.activity();
+    assert_eq!(refresh["sessions_updates"], true);
+    assert!(refresh["repositories"].as_array().is_none_or(Vec::is_empty));
+    assert!(refresh["checkouts"].as_array().is_none_or(Vec::is_empty));
+    assert!(refresh["worktrees"].as_array().is_none_or(Vec::is_empty));
+    assert!(
+        fixture.remote(json!({"action":"session_status","version":2}))["error"]
+            .as_str()
+            .unwrap()
+            .contains("incompatible")
+    );
+    // Cache-only refresh remains usable with unavailable repository configuration.
+    fs::write(fixture.dir.path().join("server.json"), b"invalid JSON").unwrap();
+    assert_eq!(fixture.activity()["sessions_updates"], true);
+    assert!(fixture.activity()["sessions"].is_object());
+}
+
+fn configure_pi(fixture: &mut Fixture, arguments: &[&str]) {
+    let agent = fixture.dir.path().join("fake-agent");
+    fs::write(&agent, "#!/bin/sh\nprintf '%s\\000' \"$@\" > \"args-$WUMPA_SESSION_ID\"\nprintf '%s' \"$WUMPA_ACTIVITY_SOCKET\" > \"socket-$WUMPA_SESSION_ID\"\nprintf 'ready' > \"ready-$WUMPA_SESSION_ID\"\nwhile :; do sleep 1; done\n").unwrap();
+    let path = fixture.dir.path().join("server.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut command = vec![agent.to_str().unwrap()];
+    command.extend_from_slice(arguments);
+    config["agent_command"] = json!(command);
+    config["agent_integration"] = json!("pi");
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fixture.restart();
+}
+
+fn pi_arguments(fixture: &Fixture, id: &str) -> Vec<String> {
+    let path = fixture.repo.join(format!("args-{id}"));
+    wait(|| {
+        fs::read_to_string(fixture.repo.join(format!("ready-{id}")))
+            .is_ok_and(|value| value == "ready")
+    });
+    let bytes = fs::read(path).unwrap();
+    bytes
+        .strip_suffix(&[0])
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect()
+}
+
+#[test]
+fn embedded_pi_launches_get_private_source_literal_names_and_distinct_authoritative_endpoints() {
+    let mut fixture = Fixture::new();
+    configure_pi(
+        &mut fixture,
+        &["--offline", "literal argument", "", "--", "--resume"],
+    );
+    let mut resources = Vec::new();
+    for (key, label) in [
+        ("a", "Fix authentication"),
+        ("b", "Name ; $(not-a-command)"),
+    ] {
+        let mut operation = json!({"action":"create", "request_id":key.repeat(32),
+        "name":label, "observations":fixture.observations(), "environment":[
+            {"name":STANDARD.encode("PATH"), "value":STANDARD.encode(std::env::var("PATH").unwrap())},
+            {"name":STANDARD.encode("WUMPA_ACTIVITY_SOCKET"), "value":STANDARD.encode("/caller/spoof.sock")},
+            {"name":STANDARD.encode("WUMPA_SESSION_ID"), "value":STANDARD.encode("spoofed")}
+        ]});
+        let created = fixture.operation(operation.take());
+        let id = created["session_id"].as_str().unwrap().to_owned();
+        let arguments = pi_arguments(&fixture, &id);
+        assert_eq!(arguments[0], "--extension");
+        assert_eq!(
+            &arguments[2..],
+            &[
+                "--name",
+                label,
+                "--offline",
+                "literal argument",
+                "",
+                "--",
+                "--resume"
+            ]
+        );
+        let source = PathBuf::from(&arguments[1]);
+        assert!(source.is_absolute());
+        assert_eq!(
+            fs::read_to_string(&source).unwrap(),
+            include_str!("../agent-extensions/pi.ts")
+        );
+        assert_eq!(source.metadata().unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(
+            source.parent().unwrap().metadata().unwrap().mode() & 0o7777,
+            0o700
+        );
+        let socket =
+            PathBuf::from(fs::read_to_string(fixture.repo.join(format!("socket-{id}"))).unwrap());
+        assert_eq!(socket.parent(), source.parent());
+        assert_eq!(
+            socket.file_name().unwrap().to_str().unwrap(),
+            format!("a-{id}.activity.sock")
+        );
+        assert!(!socket.exists()); // The fake Pi records flags but does not bind.
+        resources.push((id, source));
+    }
+    assert_ne!(resources[0].1, resources[1].1);
+    let tmux_environment = Command::new("tmux")
+        .arg("-S")
+        .arg(fixture.dir.path().join(".c.sock.sessions/tmux.sock"))
+        .args(["show-environment", "-g"])
+        .output()
+        .unwrap();
+    assert!(tmux_environment.status.success());
+    assert!(!String::from_utf8_lossy(&tmux_environment.stdout).contains("WUMPA_ACTIVITY_SOCKET"));
+    assert!(!String::from_utf8_lossy(&tmux_environment.stdout).contains("WUMPA_SESSION_ID"));
+    fixture.restart();
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 2);
+    for (id, source) in resources {
+        assert!(source.exists()); // Daemon restart must not break Pi /reload.
+        let runner = fixture
+            .dir
+            .path()
+            .join(".c.sock.sessions")
+            .join(format!("a-{id}.sock"));
+        assert_eq!(
+            request(&runner, json!({"action":"stop", "session_id":id}))["stopped"],
+            true
+        );
+        wait(|| !source.parent().unwrap().exists());
+    }
+}
+
+#[test]
+fn pi_resources_are_isolated_between_wumpa_instances() {
+    let mut first = Fixture::new();
+    let mut second = Fixture::new();
+    configure_pi(&mut first, &[]);
+    configure_pi(&mut second, &[]);
+    let created_first = first.create_named(&"a".repeat(32), Some("Same name"));
+    let created_second = second.create_named(&"a".repeat(32), Some("Same name"));
+    let args_first = pi_arguments(&first, created_first["session_id"].as_str().unwrap());
+    let args_second = pi_arguments(&second, created_second["session_id"].as_str().unwrap());
+    assert!(Path::new(&args_first[1]).starts_with(first.dir.path()));
+    assert!(Path::new(&args_second[1]).starts_with(second.dir.path()));
+    assert_ne!(args_first[1], args_second[1]);
+}
+
+#[test]
+fn pi_explicit_names_and_existing_conversation_flags_preserve_configured_arguments() {
+    let mut fixture = Fixture::new();
+    for (index, arguments) in [
+        vec!["--name", "User selected"],
+        vec!["-n", "Short name"],
+        vec!["--continue"],
+        vec!["--resume"],
+        vec!["--session", "existing.json"],
+        vec!["--session-id", "existing"],
+        vec!["--fork", "existing.json"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        configure_pi(&mut fixture, arguments);
+        let created = fixture.create_named(&format!("{index:032x}"), Some("Wumpa fallback"));
+        let id = created["session_id"].as_str().unwrap();
+        let actual = pi_arguments(&fixture, id);
+        assert_eq!(actual[0], "--extension");
+        assert_eq!(&actual[2..], arguments);
+    }
+}
+
+#[test]
+fn pi_materialization_failure_still_launches_the_configured_agent() {
+    let mut fixture = Fixture::new();
+    let parent = fixture.dir.path().join("long-control-parent");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.socket = parent.join("c.sock");
+    let agent = fixture.dir.path().join("fake-agent");
+    fs::write(&agent, "#!/bin/sh\nprintf '%s' \"$#\" > fallback-argc\nprintf '%s:%s' \"${WUMPA_ACTIVITY_SOCKET-unset}\" \"${WUMPA_SESSION_ID-unset}\" > fallback-env\nwhile :; do sleep 1; done\n").unwrap();
+    let path = fixture.dir.path().join("server.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["agent_integration"] = json!("pi");
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fixture.restart();
+    let created = fixture.create_named(&"d".repeat(32), Some("Cannot instrument"));
+    assert_eq!(created["status"], "created", "{created}");
+    wait(|| fixture.repo.join("fallback-env").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("fallback-env")).unwrap(),
+        "unset:unset"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("fallback-argc")).unwrap(),
+        "0"
+    );
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 1);
+    assert!(
+        !fs::read_dir(parent.join(".c.sock.sessions"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("pi-"))
+    );
+}
+
+#[test]
+fn disabled_integration_does_not_inject_flags_or_accept_caller_integration_environment() {
+    let mut fixture = Fixture::new();
+    let agent = fixture.dir.path().join("fake-agent");
+    fs::write(&agent, "#!/bin/sh\nprintf '%s' \"$#\" > disabled-argc\nprintf '%s:%s' \"${WUMPA_ACTIVITY_SOCKET-unset}\" \"${WUMPA_SESSION_ID-unset}\" > disabled-env\nwhile :; do sleep 1; done\n").unwrap();
+    fixture.restart();
+    let created = fixture.operation(json!({"action":"create", "request_id":"c".repeat(32),
+    "observations":fixture.observations(), "environment":[
+        {"name":STANDARD.encode("PATH"), "value":STANDARD.encode(std::env::var("PATH").unwrap())},
+        {"name":STANDARD.encode("WUMPA_ACTIVITY_SOCKET"), "value":STANDARD.encode("/spoof.sock")},
+        {"name":STANDARD.encode("WUMPA_SESSION_ID"), "value":STANDARD.encode("spoofed")}
+    ]}));
+    assert_eq!(created["status"], "created");
+    wait(|| fixture.repo.join("disabled-env").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("disabled-env")).unwrap(),
+        "unset:unset"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("disabled-argc")).unwrap(),
+        "0"
+    );
 }

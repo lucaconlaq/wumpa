@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use std::process::{Command, ExitCode};
 
 mod agent;
+mod agent_activity;
+mod agent_integration;
 mod checkout;
 mod client;
 mod clone;

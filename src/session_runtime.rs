@@ -67,6 +67,11 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
     pub error: Option<String>,
     pub supported: bool,
+    /// Verified local integration descriptors; never serialized remotely.
+    #[cfg(target_os = "linux")]
+    pub integrations: Vec<(SessionId, crate::agent_integration::Metadata)>,
+    /// Projected from the independent subscriber cache at read time.
+    pub activity: Vec<(SessionId, crate::agent_activity::Status)>,
 }
 
 /// Public session summary without local instance/attachment or launch secrets.
@@ -76,6 +81,40 @@ pub struct Summary {
     pub checkout: PathBuf,
     pub label: String,
     pub state: State,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent_activity::Activity::is_unknown"
+    )]
+    pub activity: crate::agent_activity::Activity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_session_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_session_id: Option<String>,
+}
+
+impl Summary {
+    /// Current Pi name or the original Wumpa label for unnamed/unsupported agents.
+    pub fn display_name(&self) -> &str {
+        self.pi_session_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&self.label)
+    }
+
+    /// Process failures/transitions remain authoritative; only Running uses Pi activity.
+    pub fn display_state(&self) -> &'static str {
+        use crate::agent_activity::Activity;
+        match self.state {
+            State::Starting => "Starting",
+            State::Stopping => "Stopping",
+            State::CleanupFailed => "Cleanup failed",
+            State::Running => match self.activity {
+                Activity::Working => "Running",
+                Activity::WaitingForInput => "Waiting for input",
+                Activity::Unknown => "Unknown",
+            },
+        }
+    }
 }
 
 /// Backward-compatible optional remote snapshot, separate from local responses.
@@ -95,10 +134,26 @@ impl Snapshot {
                 .sessions
                 .into_iter()
                 .map(|session| Summary {
-                    id: session.id,
+                    id: session.id.clone(),
                     checkout: session.checkout.root.path,
                     label: session.label,
                     state: session.state,
+                    activity: self
+                        .activity
+                        .iter()
+                        .find(|(id, _)| *id == session.id)
+                        .map(|(_, status)| status.activity)
+                        .unwrap_or_default(),
+                    pi_session_name: self
+                        .activity
+                        .iter()
+                        .find(|(id, _)| *id == session.id)
+                        .and_then(|(_, status)| status.pi_session_name.clone()),
+                    pi_session_id: self
+                        .activity
+                        .iter()
+                        .find(|(id, _)| *id == session.id)
+                        .and_then(|(_, status)| status.pi_session_id.clone()),
                 })
                 .collect(),
         };
@@ -108,6 +163,63 @@ impl Snapshot {
 }
 
 impl RemoteSnapshot {
+    /// Display-only shortest unique prefixes, at least five hex characters.
+    /// Compare all distinct IDs on this server, including other checkouts.
+    /// Full identities remain unchanged in summaries and attachment requests.
+    pub fn display_ids(&self) -> std::collections::BTreeMap<String, String> {
+        let mut ids = self
+            .sessions
+            .iter()
+            .map(|session| String::from(session.id.clone()))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut labels = std::collections::BTreeMap::new();
+        for (index, id) in ids.iter().enumerate() {
+            let mut length = 5;
+            // In sorted order, only the adjacent IDs can share the longest prefix.
+            for neighbor in index
+                .checked_sub(1)
+                .and_then(|previous| ids.get(previous))
+                .into_iter()
+                .chain(ids.get(index + 1))
+            {
+                let shared = id
+                    .bytes()
+                    .zip(neighbor.bytes())
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                length = length.max(shared + 1);
+            }
+            // SessionId validates exactly 32 ASCII hex characters.
+            labels.insert(id.clone(), id[..length.min(id.len())].to_owned());
+        }
+        labels
+    }
+
+    /// Transport/discovery loss never implies idle; keep explicitly cached names.
+    pub fn invalidate_activity(&mut self) {
+        for session in &mut self.sessions {
+            session.activity = crate::agent_activity::Activity::Unknown;
+        }
+    }
+
+    /// Preserve a previously known name only when a server has no verified Pi
+    /// identity yet. A snapshot with a Pi identity and no name is an actual clear.
+    pub fn retain_cached_names(&mut self, previous: &Self) {
+        for session in &mut self.sessions {
+            if session.activity.is_unknown()
+                && session.pi_session_id.is_none()
+                && session.pi_session_name.is_none()
+            {
+                if let Some(old) = previous.sessions.iter().find(|old| old.id == session.id) {
+                    session.pi_session_name = old.pi_session_name.clone();
+                    session.pi_session_id = old.pi_session_id.clone();
+                }
+            }
+        }
+    }
+
     /// Agent metadata must not consume the repository browsing response budget.
     pub fn limit(&mut self) {
         if serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > 128 * 1024) {
@@ -122,6 +234,8 @@ impl RemoteSnapshot {
 struct Record {
     creation: CreationRecord,
     session: Session,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi: Option<crate::agent_integration::Metadata>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +255,8 @@ struct Launch {
     session_id: SessionId,
     checkout: checkout::Checkout,
     command: crate::config::AgentCommand,
+    integration: crate::config::AgentIntegration,
+    label: String,
     environment: crate::session_environment::Environment,
 }
 
@@ -159,6 +275,8 @@ struct RunnerStatus {
     checkout: CheckoutAssociation,
     state: State,
     stopped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi: Option<crate::agent_integration::Metadata>,
 }
 
 /// Generate opaque IDs with OS randomness, without a dependency or time-based IDs.
@@ -539,6 +657,7 @@ impl Manager {
                 sessions: Vec::new(),
                 supported: false,
                 error: Some("Agent runtime moved/replaced; manual recovery required".into()),
+                ..Default::default()
             };
         }
         if !self.backend_supported {
@@ -547,6 +666,8 @@ impl Manager {
                 return Snapshot::default();
             }
         }
+        #[cfg(target_os = "linux")]
+        let mut integrations = Vec::new();
         let result = (|| -> Result<Vec<Session>> {
             let live = self.discovered(deadline)?;
             let mut sessions = Vec::new();
@@ -578,6 +699,10 @@ impl Manager {
                     self.command(&["kill-session", "-t", &name], deadline)?;
                     continue;
                 }
+                if record.pi != status.pi {
+                    record.pi = status.pi.clone();
+                    save_private(&path, &record)?;
+                }
                 // Backend membership and runner identity agree; recover a lost reply.
                 if matches!(record.creation.outcome, CreationOutcome::InProgress) {
                     record.creation.outcome = CreationOutcome::Created {
@@ -599,13 +724,24 @@ impl Manager {
                         continue;
                     }
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(metadata) = record.pi {
+                    integrations.push((id, metadata));
+                }
                 sessions.push(record.session);
             }
             Ok(sessions)
         })();
         match result {
-            Ok(sessions) => Snapshot { sessions, error: None, supported: cfg!(target_os = "linux") },
-            Err(_) => Snapshot { sessions: Vec::new(), error: Some("Agent discovery/reconciliation unavailable; existing agents were not reassociated".into()), supported: cfg!(target_os = "linux") },
+            Ok(sessions) => Snapshot {
+                sessions,
+                #[cfg(target_os = "linux")]
+                integrations,
+                error: None,
+                supported: cfg!(target_os = "linux"),
+                ..Default::default()
+            },
+            Err(_) => Snapshot { sessions: Vec::new(), error: Some("Agent discovery/reconciliation unavailable; existing agents were not reassociated".into()), supported: cfg!(target_os = "linux"), ..Default::default() },
         }
     }
 
@@ -830,6 +966,7 @@ impl Manager {
                                 }),
                                 state: State::Starting,
                             },
+                            pi: None,
                         };
                         save_private(&path, &record).map_err(|_| Failure::LaunchFailed)?;
                         let launch = Launch {
@@ -837,6 +974,8 @@ impl Manager {
                             session_id: id.clone(),
                             checkout,
                             command: config.agent_command.clone(),
+                            integration: config.agent_integration,
+                            label: record.session.label.clone(),
                             environment,
                         };
                         match self.launch(
@@ -845,7 +984,8 @@ impl Manager {
                             &path,
                             deadline,
                         ) {
-                            Ok(()) => {
+                            Ok(pi) => {
+                                record.pi = pi;
                                 record.creation.outcome = CreationOutcome::Created {
                                     session_id: id.clone(),
                                 };
@@ -889,7 +1029,7 @@ impl Manager {
         new_server: bool,
         record_path: &Path,
         deadline: Instant,
-    ) -> Result<()> {
+    ) -> Result<Option<crate::agent_integration::Metadata>> {
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
         let channel = self
             .directory
@@ -983,7 +1123,7 @@ impl Manager {
                     {
                         return Err("agent launch did not confirm readiness".into());
                     }
-                    return Ok(());
+                    return Ok(ready.pi);
                 }
                 Err(error)
                     if error.kind() == std::io::ErrorKind::WouldBlock
@@ -1201,7 +1341,30 @@ mod runner {
         if STOP.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("launch cancelled by supervisor termination".into());
         }
-        let mut command = prepared.command(&launch.command, &launch.checkout.root.path)?;
+        let mut pi_resource = if launch.integration == crate::config::AgentIntegration::Pi {
+            crate::agent_integration::Resource::new(
+                channel.parent().ok_or("missing runtime directory")?,
+                &id,
+            )
+            .ok()
+        } else {
+            None
+        };
+        let mut command = if let Some(resource) = &pi_resource {
+            let executable =
+                crate::config::AgentCommand::try_from(vec![launch.command.arguments()[0].clone()])?;
+            let mut command = prepared.command(&executable, &launch.checkout.root.path)?;
+            resource.configure(&mut command, &launch.command, &launch.label, &id);
+            command
+        } else {
+            prepared.command(&launch.command, &launch.checkout.root.path)?
+        };
+        if pi_resource.is_none() {
+            // Reserved integration variables cannot be supplied by callers to
+            // disabled/unsupported agents or failed materializations.
+            command.env_remove("WUMPA_ACTIVITY_SOCKET");
+            command.env_remove("WUMPA_SESSION_ID");
+        }
         // tmux's newly allocated pane supplies fresh terminal bookkeeping.
         for name in ["TERM", "TMUX", "TMUX_PANE"] {
             if let Some(value) = std::env::var_os(name) {
@@ -1228,12 +1391,18 @@ mod runner {
             });
         }
         let mut child = command.spawn().map_err(|_| "agent execution failed")?;
+        if let Some(resource) = pi_resource.as_mut() {
+            resource.launched();
+        }
         let status = RunnerStatus {
             instance: launch.instance,
             session_id: id,
             checkout: CheckoutAssociation::from(&launch.checkout),
             state: State::Running,
             stopped: false,
+            pi: pi_resource
+                .as_ref()
+                .map(crate::agent_integration::Resource::metadata),
         };
         // Disconnect/lost launch acknowledgement must not destroy a live agent.
         let _ = crate::protocol::write_message(&status, &mut exchange);
@@ -1299,6 +1468,7 @@ mod runner {
                                 State::Running
                             },
                             stopped,
+                            pi: status.pi.clone(),
                         };
                         crate::protocol::write_message(&response, &mut exchange)?;
                         Ok(stop && stopped)
@@ -1321,6 +1491,10 @@ mod runner {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        if let Some(resource) = pi_resource.as_mut() {
+            resource.terminated();
+        }
+        drop(pi_resource);
         // Preserve completion evidence before removing the whole owned session.
         // Extra windows/panes must not retain an exited agent indefinitely.
         let completed = RunnerStatus {
@@ -1401,11 +1575,111 @@ mod tests {
                 label: "pi".into(),
                 checkout: format!("/{}", "x".repeat(128 * 1024)).into(),
                 state: State::Running,
+                activity: Default::default(),
+                pi_session_name: None,
+                pi_session_id: None,
             }],
         };
         remote.limit();
         assert!(remote.error.is_some());
         assert!(remote.sessions.is_empty());
+    }
+
+    #[test]
+    fn display_ids_are_minimal_unique_server_wide_and_never_change_full_identities() {
+        let summary = |id: String, checkout: &str| Summary {
+            id: SessionId::try_from(id).unwrap(),
+            checkout: checkout.into(),
+            label: "Same name".into(),
+            state: State::Running,
+            activity: Default::default(),
+            pi_session_name: None,
+            pi_session_id: None,
+        };
+        let first = format!("abcde0{}", "0".repeat(26));
+        let second = format!("abcde10{}", "0".repeat(25));
+        let third = format!("abcde11{}", "0".repeat(25));
+        let separate = "f".repeat(32);
+        let mut snapshot = RemoteSnapshot {
+            sessions: vec![
+                summary(first.clone(), "/one"),
+                summary(third.clone(), "/two"),
+                summary(second.clone(), "/three"),
+                summary(separate.clone(), "/one"),
+            ],
+            supported: true,
+            error: None,
+        };
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let labels = snapshot.display_ids();
+        assert_eq!(labels[&first], "abcde0");
+        assert_eq!(labels[&second], "abcde10");
+        assert_eq!(labels[&third], "abcde11");
+        assert_eq!(labels[&separate], "fffff");
+        assert_eq!(serde_json::to_vec(&snapshot).unwrap(), serialized);
+        snapshot.sessions.reverse();
+        assert_eq!(snapshot.display_ids(), labels);
+        snapshot
+            .sessions
+            .retain(|session| String::from(session.id.clone()) == first);
+        snapshot.sessions.push(snapshot.sessions[0].clone());
+        assert_eq!(snapshot.display_ids()[&first], "abcde"); // Duplicate identity is not a collision.
+        snapshot.sessions.clear();
+        assert!(snapshot.display_ids().is_empty());
+        let almost_same = format!("{}b", "a".repeat(31));
+        let same_prefix = "a".repeat(32);
+        snapshot.sessions = vec![
+            summary(almost_same.clone(), "/one"),
+            summary(same_prefix.clone(), "/one"),
+        ];
+        assert_eq!(snapshot.display_ids()[&almost_same], almost_same);
+        assert_eq!(snapshot.display_ids()[&same_prefix], same_prefix);
+    }
+
+    #[test]
+    fn activity_summaries_are_backward_compatible_and_names_clear_only_authoritatively() {
+        use crate::agent_activity::Activity;
+        let mut legacy: Summary = serde_json::from_value(serde_json::json!({
+            "id":"a".repeat(32), "checkout":"/repo", "label":"original", "state":"running"
+        }))
+        .unwrap();
+        assert_eq!(legacy.activity, Activity::Unknown);
+        assert_eq!(legacy.display_state(), "Unknown");
+        assert_eq!(legacy.display_name(), "original");
+        legacy.activity = Activity::WaitingForInput;
+        assert_eq!(legacy.display_state(), "Waiting for input");
+        legacy.activity = Activity::Working;
+        assert_eq!(legacy.display_state(), "Running");
+        legacy.pi_session_name = Some("Pi renamed".into());
+        legacy.pi_session_id = Some("conversation".into());
+        let previous = RemoteSnapshot {
+            sessions: vec![legacy.clone()],
+            supported: true,
+            error: None,
+        };
+        let mut current = previous.clone();
+        current.sessions[0].pi_session_id = None;
+        current.sessions[0].pi_session_name = None;
+        current.invalidate_activity();
+        current.retain_cached_names(&previous);
+        assert_eq!(current.sessions[0].display_name(), "Pi renamed");
+        assert_eq!(current.sessions[0].display_state(), "Unknown");
+        current.sessions[0].pi_session_id = Some("new-conversation".into());
+        current.sessions[0].pi_session_name = None;
+        current.retain_cached_names(&previous);
+        assert_eq!(current.sessions[0].display_name(), "original");
+        for (state, label) in [
+            (State::Starting, "Starting"),
+            (State::Stopping, "Stopping"),
+            (State::CleanupFailed, "Cleanup failed"),
+        ] {
+            current.sessions[0].state = state;
+            assert_eq!(current.sessions[0].display_state(), label);
+        }
+        let serialized = serde_json::to_value(&previous).unwrap();
+        assert_eq!(serialized["sessions"][0]["activity"], "working");
+        assert!(serialized["sessions"][0].get("instance").is_none());
+        assert!(serialized["sessions"][0].get("directory").is_none());
     }
 
     #[test]
@@ -1504,6 +1778,7 @@ mod tests {
                     },
                 },
                 session,
+                pi: None,
             },
         )
         .unwrap();
@@ -1574,6 +1849,7 @@ mod tests {
                         checkout: association.clone(),
                         state: State::CleanupFailed,
                         stopped: false,
+                        pi: None,
                     },
                     &mut exchange,
                 )
