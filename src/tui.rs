@@ -1441,14 +1441,32 @@ mod tests {
         let command = app.ssh_command.take().unwrap();
         assert_eq!(
             command.get_args().last().unwrap(),
-            "cd '/repo' && exec wumpa agent-create --port 8123"
+            crate::agent_client::create(
+                &app.config.servers[1].connection,
+                std::path::Path::new("/repo"),
+                None,
+                true,
+            )
+            .unwrap()
+            .get_args()
+            .last()
+            .unwrap()
         );
         app.repos.select(Some(1));
         app.key(key(KeyCode::Char('n')));
         let command = app.ssh_command.take().unwrap();
         assert_eq!(
             command.get_args().last().unwrap(),
-            "cd '/linked tree' && exec wumpa agent-create --port 8123"
+            crate::agent_client::create(
+                &app.config.servers[1].connection,
+                std::path::Path::new("/linked tree"),
+                None,
+                true,
+            )
+            .unwrap()
+            .get_args()
+            .last()
+            .unwrap()
         );
         app.config.servers[1].connection = Connection::Local { port: 8123 };
         app.key(key(KeyCode::Char('n')));
