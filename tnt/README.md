@@ -94,3 +94,11 @@ ssh tnt 'sudo nixos-rebuild switch --rollback'
 
 The server includes Wumpa, Zsh, Starship, Git, mise, tmux, Node.js 24, and CLI utilities.
 The system-wide shell alias `a` runs `wumpa agent --socket /run/wumpa/control.sock`.
+
+The Nix service sets `agent_integration: "pi"` in the writable
+`/home/wumpa/.config/wumpa/server.json` before each start, preserving repositories
+and other settings. TNT's configured agent command must accept Pi's CLI flags.
+This enables activity reporting, initial session naming, and `/name` updates in
+the dashboard; see [Pi integration](../agent-extensions/README.md).
+Existing agents survive service restarts but remain uninstrumented if launched
+with integration disabled. Launch new agents after deploying this setting.

@@ -129,7 +129,7 @@ impl From<AgentCommand> for Vec<String> {
     }
 }
 
-/// Explicit agent integration; never inferred from an executable basename.
+/// Agent integration selection; explicit settings override command-based defaults.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentIntegration {
@@ -139,19 +139,63 @@ pub enum AgentIntegration {
 }
 
 /// Server-owned storage settings, agent launch settings, and repository metadata.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "ServerConfigInput")]
 pub struct ServerConfig {
     /// Applied only to new agents; older configurations default to `["pi"]`.
-    #[serde(default)]
     pub agent_command: AgentCommand,
-    /// Opt-in Pi flags and embedded extension for newly launched agents only.
-    #[serde(default)]
+    /// Pi flags and embedded extension for new agents; defaults on for `pi`.
     pub agent_integration: AgentIntegration,
     /// Resolved and persisted at startup; absent in legacy configurations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_dir: Option<PathBuf>,
-    #[serde(deserialize_with = "deserialize_repositories")]
     pub repositories: Vec<Repository>,
+}
+
+// Resolve the dependent default only after both launch settings are read.
+#[derive(Default, Deserialize)]
+struct ServerConfigInput {
+    #[serde(default)]
+    agent_command: AgentCommand,
+    #[serde(default, deserialize_with = "deserialize_integration")]
+    agent_integration: Option<AgentIntegration>,
+    #[serde(default)]
+    repository_dir: Option<PathBuf>,
+    #[serde(deserialize_with = "deserialize_repositories")]
+    repositories: Vec<Repository>,
+}
+
+fn deserialize_integration<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<AgentIntegration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    AgentIntegration::deserialize(deserializer).map(Some)
+}
+
+impl From<ServerConfigInput> for ServerConfig {
+    fn from(input: ServerConfigInput) -> Self {
+        let agent_integration = input.agent_integration.unwrap_or_else(|| {
+            if input.agent_command.arguments()[0] == "pi" {
+                AgentIntegration::Pi
+            } else {
+                AgentIntegration::Disabled
+            }
+        });
+        Self {
+            agent_command: input.agent_command,
+            agent_integration,
+            repository_dir: input.repository_dir,
+            repositories: input.repositories,
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfigInput::default().into()
+    }
 }
 
 fn deserialize_repositories<'de, D>(
@@ -359,9 +403,40 @@ mod tests {
     }
 
     #[test]
-    fn pi_integration_is_explicit_and_disabled_for_legacy_settings() {
+    fn pi_integration_defaults_to_pi_for_the_pi_command() {
+        assert_eq!(
+            ServerConfig::default().agent_integration,
+            AgentIntegration::Pi
+        );
         let legacy: ServerConfig = serde_json::from_str(r#"{"repositories":[]}"#).unwrap();
-        assert_eq!(legacy.agent_integration, AgentIntegration::Disabled);
+        assert_eq!(legacy.agent_integration, AgentIntegration::Pi);
+        for (command, expected) in [
+            (vec!["pi"], AgentIntegration::Pi),
+            (vec!["pi", "--offline"], AgentIntegration::Pi),
+            (vec!["wrapper", "pi"], AgentIntegration::Disabled),
+            (vec!["/custom/pi"], AgentIntegration::Disabled),
+            (vec!["another-agent"], AgentIntegration::Disabled),
+        ] {
+            let config: ServerConfig = serde_json::from_value(serde_json::json!({
+                "repositories": [],
+                "agent_command": command,
+            }))
+            .unwrap();
+            assert_eq!(config.agent_integration, expected);
+        }
+    }
+
+    #[test]
+    fn explicit_integration_overrides_command_defaults_and_round_trips() {
+        let disabled: ServerConfig = serde_json::from_str(
+            r#"{"repositories":[],"agent_integration":"disabled","agent_command":["pi"]}"#,
+        )
+        .unwrap();
+        assert_eq!(disabled.agent_integration, AgentIntegration::Disabled);
+        let saved = serde_json::to_value(disabled).unwrap();
+        assert_eq!(saved["agent_integration"], "disabled");
+        let loaded: ServerConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.agent_integration, AgentIntegration::Disabled);
         let enabled: ServerConfig = serde_json::from_str(
             r#"{"repositories":[],"agent_integration":"pi","agent_command":["wrapper"]}"#,
         )
@@ -371,12 +446,15 @@ mod tests {
             serde_json::to_value(enabled).unwrap()["agent_integration"],
             "pi"
         );
-        assert!(
-            serde_json::from_str::<ServerConfig>(
-                r#"{"repositories":[],"agent_integration":"auto"}"#,
-            )
-            .is_err()
-        );
+        for integration in [serde_json::json!("auto"), serde_json::Value::Null] {
+            assert!(
+                serde_json::from_value::<ServerConfig>(serde_json::json!({
+                    "repositories": [],
+                    "agent_integration": integration,
+                }))
+                .is_err()
+            );
+        }
     }
 
     #[test]

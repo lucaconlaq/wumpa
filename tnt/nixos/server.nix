@@ -80,6 +80,21 @@ in
       HOME = "/home/wumpa";
       WUMPA_SERVER_CONFIG = "/home/wumpa/.config/wumpa/server.json";
     };
+    # Keep server-owned repository metadata writable; manage only this setting.
+    preStart = ''
+      set -eu
+      config="$WUMPA_SERVER_CONFIG"
+      mkdir -p "$(dirname "$config")"
+      temporary=$(mktemp "$config.XXXXXX")
+      trap 'rm -f -- "$temporary"' EXIT
+      if [ -e "$config" ]; then
+        ${pkgs.jq}/bin/jq '.agent_integration = "pi"' "$config" > "$temporary"
+      else
+        printf '%s\n' '{"repositories":[],"agent_integration":"pi"}' > "$temporary"
+      fi
+      chmod 600 "$temporary"
+      mv -f -- "$temporary" "$config"
+    '';
     serviceConfig = {
       Type = "simple";
       User = "wumpa";

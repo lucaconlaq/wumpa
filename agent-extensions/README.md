@@ -1,7 +1,7 @@
 # Bundled Pi activity extension
 
 `pi.ts` is embedded in Wumpa with Rust `include_str!()` by
-`src/agent_integration.rs`. Explicitly configured Pi agents receive a private
+`src/agent_integration.rs`. Pi-integrated agents receive a private
 runtime copy and literal extension/name arguments from their runner. There is no
 separate package to install. `src/agent_activity.rs` maintains authenticated,
 bounded subscriptions independently of Git and agent-control locks. Remote-safe
@@ -92,13 +92,16 @@ against the same UID.
 
 ## Launch/config precedence
 
-Set `agent_integration: "pi"` in the existing server configuration to enable the
-integration for newly launched agents after restarting the Wumpa server. The
-default is `"disabled"`, even when
-`agent_command` is `["pi"]`. Only explicit Pi selection adds literal
-`--extension <path>`; normal Pi resource discovery remains enabled. Wrappers must
-accept/forward these flags. Integration is never inferred from an executable name.
-There is no modification to `~/.pi`, service environment, or tmux environment.
+When `agent_integration` is omitted, it defaults to `"pi"` if the first element of
+`agent_command` is exactly `"pi"` (including commands with additional arguments).
+The default command is `["pi"]`, so a new configuration enables integration.
+Other executables, including explicit paths such as `/usr/bin/pi` and wrappers,
+default to `"disabled"`; set `agent_integration: "pi"` to enable them explicitly.
+An explicit `"disabled"` always opts out, including in previously saved configs.
+Restart the Wumpa server after changing configuration; only new agents are affected.
+Pi integration adds literal `--extension <path>`; normal Pi resource discovery
+remains enabled. Wrappers must accept/forward these flags. There is no modification
+to `~/.pi`, service environment, or tmux environment.
 
 For a new conversation, prepend `--name <Wumpa label>` before configured Pi
 arguments (and before an option terminator). Do not inject a name when the
@@ -205,7 +208,7 @@ tsc --noEmit --strict --skipLibCheck --target ES2022 --module ESNext \
   Optional summary fields preserve old-client compatibility. Existing agents and
   disabled/non-Pi integrations show `Unknown`; enabling configuration affects new
   launches only. Remote summaries never include activity endpoint/source paths.
-- For unexpected `Unknown`, verify explicit opt-in, rebuild/restart Wumpa, and
+- For unexpected `Unknown`, verify integration is enabled, rebuild/restart Wumpa, and
   launch a new agent. Check that wrappers forward literal extension flags, Pi is
   the supported version, and the private Unix path fits 107 bytes. Insecure,
   occupied, replaced, malformed, or unsupported endpoints fail closed. Do not
