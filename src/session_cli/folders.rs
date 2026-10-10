@@ -20,6 +20,7 @@ use crate::{Result, checkout::TrackedFolder, output::clean};
 struct FolderPicker {
     selected: ListState,
     error: Option<String>,
+    delete: bool,
 }
 
 impl FolderPicker {
@@ -27,6 +28,7 @@ impl FolderPicker {
         Self {
             selected: ListState::default().with_selected((count > 0).then_some(0)),
             error: None,
+            delete: false,
         }
     }
 
@@ -59,6 +61,10 @@ impl FolderPicker {
             }
             KeyCode::Home => self.selected.select(Some(0)),
             KeyCode::End => self.selected.select(Some(folders.len() - 1)),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.delete = true;
+                return Some(Some(folders[selected].path.clone()));
+            }
             KeyCode::Enter => {
                 if let Some(error) = &folders[selected].error {
                     self.error = Some(error.clone());
@@ -141,7 +147,10 @@ impl FolderPicker {
                         muted
                     },
                 ),
-                Line::styled("  ↑↓ select · enter open · esc cancel", muted),
+                Line::styled(
+                    "  ↑↓ select · enter open · d delete folder · esc cancel",
+                    muted,
+                ),
             ]),
             rows[2],
         );
@@ -167,14 +176,17 @@ pub(super) fn choose(
     folders: &[TrackedFolder],
     directory: &Path,
     plain: bool,
+    handshake: &crate::control::Handshake,
 ) -> Result<Option<PathBuf>> {
+    let mut delete = false;
     let heading = heading(folders, directory);
     let selected = if plain || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        choose_plain(
+        choose_plain_action(
             folders,
             heading,
             &mut io::stdin().lock(),
             &mut io::stdout().lock(),
+            &mut delete,
         )?
     } else {
         let mut terminal = InlineTerminal::new(folders.len().clamp(3, 6) as u16 + 4)?;
@@ -188,16 +200,34 @@ pub(super) fn choose(
             }
         };
         terminal.finish()?;
+        delete = picker.delete;
         selected
     };
+    if delete {
+        if let Some(path) = selected {
+            super::delete_selected(handshake, crate::deletion::Target::Folder { path })?;
+        }
+        return Ok(None);
+    }
     Ok(selected)
 }
 
+#[cfg(test)]
 fn choose_plain(
     folders: &[TrackedFolder],
     heading: &str,
     input: &mut impl BufRead,
     output: &mut impl Write,
+) -> Result<Option<PathBuf>> {
+    choose_plain_action(folders, heading, input, output, &mut false)
+}
+
+fn choose_plain_action(
+    folders: &[TrackedFolder],
+    heading: &str,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    delete: &mut bool,
 ) -> Result<Option<PathBuf>> {
     writeln!(output, "{heading}")?;
     if folders.is_empty() {
@@ -221,13 +251,17 @@ fn choose_plain(
         )?;
     }
     loop {
-        write!(output, "Choose a folder (q cancels): ")?;
+        write!(output, "Choose a folder (d NUMBER deletes; q cancels): ")?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 || matches!(line.trim(), "q" | "") {
             return Ok(None);
         }
-        let index = line
+        let text = line.trim();
+        *delete = text.starts_with("d ");
+        let index = text
+            .strip_prefix("d ")
+            .unwrap_or(text)
             .trim()
             .parse::<usize>()
             .ok()
@@ -238,6 +272,9 @@ fn choose_plain(
             continue;
         };
         if let Some(error) = &folders[index].error {
+            if *delete {
+                return Ok(Some(folders[index].path.clone()));
+            }
             writeln!(output, "{}", clean(error))?;
             continue;
         }
@@ -279,6 +316,33 @@ mod tests {
         assert!(picker.error.is_none());
         assert_eq!(picker.key(key(KeyCode::Esc), &folders), Some(None));
         assert_eq!(FolderPicker::new(0).key(key(KeyCode::Enter), &[]), None);
+    }
+
+    #[test]
+    fn deletion_is_an_explicit_folder_choice() {
+        let folders = folders();
+        let mut picker = FolderPicker::new(folders.len());
+        assert_eq!(
+            picker.key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &folders
+            ),
+            Some(Some(folders[0].path.clone()))
+        );
+        assert!(picker.delete);
+        let mut delete = false;
+        assert_eq!(
+            choose_plain_action(
+                &folders,
+                "Folders",
+                &mut &b"d 1\n"[..],
+                &mut Vec::new(),
+                &mut delete
+            )
+            .unwrap(),
+            Some(folders[0].path.clone())
+        );
+        assert!(delete);
     }
 
     #[test]

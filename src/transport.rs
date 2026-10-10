@@ -39,6 +39,8 @@ pub fn cancellable_request(
     let cloning = matches!(request, Request::Clone { .. });
     let timeout = if cloning {
         protocol::CLONE_TIMEOUT + Duration::from_secs(10)
+    } else if matches!(request, Request::Delete { .. }) {
+        Duration::from_secs(90)
     } else if matches!(request, Request::SessionStatus { .. }) {
         Duration::from_secs(5)
     } else {
@@ -72,7 +74,7 @@ pub fn cancellable_request(
                 return Err("incompatible activity refresh protocol".into());
             }
         }
-        Request::List => {}
+        Request::List | Request::Delete { .. } => {}
     }
     let response: Response = match connection {
         Connection::Local { port } => {
@@ -81,7 +83,11 @@ pub fn cancellable_request(
             stream.set_read_timeout(Some(Duration::from_millis(100)))?;
             stream.set_write_timeout(Some(Duration::from_secs(2)))?;
             protocol::write_message(request, &mut stream)?;
-            let deadline = if cloning || matches!(request, Request::SessionStatus { .. }) {
+            let deadline = if cloning
+                || matches!(
+                    request,
+                    Request::SessionStatus { .. } | Request::Delete { .. }
+                ) {
                 deadline
             } else {
                 Instant::now() + Duration::from_secs(10)

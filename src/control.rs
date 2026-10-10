@@ -22,7 +22,7 @@ pub(crate) use unix::{
     Exchange, activity_connection, cleanup_socket, verify_activity_endpoint, verify_peer,
 };
 #[cfg(unix)]
-pub use unix::{Listener, handshake, preflight, sessions, tracked_folders};
+pub use unix::{Handshake, Listener, delete, handshake, preflight, sessions, tracked_folders};
 #[cfg(unix)]
 pub(crate) use unix::{local_request, recover_stale_tmux_socket, tmux_socket_metadata};
 
@@ -101,6 +101,11 @@ mod unix {
         Sessions {
             request: Box<crate::sessions::LocalRequest>,
         },
+        Delete {
+            run_id: String,
+            target: crate::deletion::Target,
+            confirmation: Option<String>,
+        },
         TrackedFolders {
             version: u32,
             run_id: String,
@@ -135,6 +140,23 @@ mod unix {
     struct TrackedFolders {
         folders: Vec<crate::checkout::TrackedFolder>,
         error: Option<String>,
+    }
+
+    /// Delete only through the authenticated local daemon and its manager lock.
+    pub fn delete(
+        handshake: &Handshake,
+        target: &crate::deletion::Target,
+        confirmation: Option<String>,
+    ) -> Result<crate::deletion::Reply> {
+        local_request(
+            &handshake.socket,
+            &Request::Delete {
+                run_id: handshake.run_id.clone(),
+                target: target.clone(),
+                confirmation,
+            },
+            Duration::from_secs(60),
+        )
     }
 
     /// Read-only local folder choices from this daemon's registration snapshot.
@@ -816,6 +838,40 @@ mod unix {
                     return Err("incompatible control version".into());
                 }
                 protocol::write_message(handshake, &mut exchange)
+            }
+            Request::Delete {
+                run_id,
+                target,
+                confirmation,
+            } => {
+                exchange.deadline = deadline + Duration::from_secs(60);
+                let result = (|| -> Result<Option<crate::deletion::Prompt>> {
+                    if run_id != handshake.run_id {
+                        return Err("daemon run changed; repeat handshake".into());
+                    }
+                    let mut config = config.lock().map_err(|_| "configuration lock poisoned")?;
+                    let mut manager = manager.lock().map_err(|_| "session lock poisoned")?;
+                    if manager.is_none() {
+                        *manager = Some(crate::session_runtime::Manager::new(&handshake.socket)?);
+                    }
+                    crate::deletion::execute(
+                        &target,
+                        confirmation.as_deref(),
+                        &mut config,
+                        manager.as_mut().ok_or("session manager unavailable")?,
+                    )
+                })();
+                let reply = match result {
+                    Ok(prompt) => crate::deletion::Reply {
+                        prompt,
+                        error: None,
+                    },
+                    Err(error) => crate::deletion::Reply {
+                        prompt: None,
+                        error: Some(error.to_string()),
+                    },
+                };
+                protocol::write_message(&reply, &mut exchange)
             }
             Request::Sessions { request } => {
                 // Reject run mismatches before initializing runtime or Git discovery.

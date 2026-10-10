@@ -25,6 +25,8 @@ use crate::{
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Choice {
     Attach(usize),
+    Delete(usize),
+    DeleteFolder,
     Create(Option<SessionName>),
     Cancel,
 }
@@ -69,6 +71,9 @@ impl Picker {
         {
             return Some(Choice::Cancel);
         }
+        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(Choice::DeleteFolder);
+        }
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -102,6 +107,10 @@ impl Picker {
                 KeyCode::End => self.selection.select(Some(count)),
                 KeyCode::Char('q') => return Some(Choice::Cancel),
                 KeyCode::Char('n') => self.naming = true,
+                KeyCode::Char('d') | KeyCode::Delete if selected < count => {
+                    return Some(Choice::Delete(selected));
+                }
+                KeyCode::Char('D') => return Some(Choice::DeleteFolder),
                 KeyCode::Enter if selected == count => self.naming = true,
                 KeyCode::Enter => return Some(Choice::Attach(selected)),
                 _ => {}
@@ -189,9 +198,9 @@ impl Picker {
             );
         }
         let help = if self.naming {
-            "  enter create · esc cancel"
+            "  enter create · ctrl-d delete folder · esc cancel"
         } else {
-            "  ↑↓ select · enter open · n new · esc cancel"
+            "  enter open · d delete agent · D delete folder · n new · esc cancel"
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -204,6 +213,33 @@ impl Picker {
                 Line::styled(help, muted),
             ]),
             rows[2],
+        );
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    #[test]
+    fn deletion_choices_do_not_attach_or_create() {
+        let mut picker = Picker::new(1);
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), 1),
+            Some(Choice::Delete(0))
+        );
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE), 1),
+            Some(Choice::DeleteFolder)
+        );
+        let mut picker = Picker::new(0);
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 0),
+            Some(Choice::DeleteFolder)
+        );
+        assert_eq!(
+            choose_plain(&[], &mut &b":delete\n"[..], &mut Vec::new()).unwrap(),
+            Choice::DeleteFolder
         );
     }
 }
@@ -393,7 +429,10 @@ fn choose_plain(
                 session.state
             )?;
         }
-        write!(output, "n) Create new   q) Cancel\nChoice: ")?;
+        write!(
+            output,
+            "n) Create new   d NUMBER) Delete agent   D) Delete folder   q) Cancel\nChoice: "
+        )?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {
@@ -402,6 +441,17 @@ fn choose_plain(
         match line.trim() {
             "q" | "" => return Ok(Choice::Cancel),
             "n" => {}
+            "D" => return Ok(Choice::DeleteFolder),
+            deletion if deletion.starts_with("d ") => {
+                let index = deletion[2..]
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|value| value.checked_sub(1))
+                    .filter(|index| *index < sessions.len())
+                    .ok_or("invalid agent selection")?;
+                return Ok(Choice::Delete(index));
+            }
             number => {
                 let index = number
                     .parse::<usize>()
@@ -416,12 +466,15 @@ fn choose_plain(
     loop {
         write!(
             output,
-            "Session name (blank for default; visible in dashboards): "
+            "Session name (blank = default; :delete deletes folder): "
         )?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {
             return Ok(Choice::Cancel);
+        }
+        if line.trim() == ":delete" {
+            return Ok(Choice::DeleteFolder);
         }
         // Remove only the line terminator, not embedded control characters.
         let line = line.strip_suffix('\n').unwrap_or(&line);

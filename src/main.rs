@@ -3,6 +3,7 @@ use std::process::{Command, ExitCode};
 
 mod agent;
 mod agent_activity;
+mod agent_client;
 mod agent_integration;
 mod checkout;
 mod client;
@@ -10,6 +11,7 @@ mod clone;
 mod config;
 mod control;
 mod daemon;
+mod deletion;
 mod helper;
 mod output;
 mod protocol;
@@ -58,6 +60,17 @@ enum Commands {
         /// Recover an uncertain creation without launching a duplicate (RUN:REQUEST)
         #[arg(long)]
         retry: Option<String>,
+    },
+    /// Create a new agent in the current tracked checkout or worktree
+    AgentCreate {
+        #[arg(long, default_value_t = 7432, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        /// Display name; omit to prompt, or pass an empty name for the default
+        #[arg(long)]
+        name: Option<String>,
+        /// Leave the new agent running without attaching (requires --name)
+        #[arg(long, requires = "name")]
+        no_attach: bool,
     },
     /// Internal SSH entry point for attachment to an existing agent
     #[command(hide = true)]
@@ -152,6 +165,11 @@ fn run() -> Result<()> {
         Some(Commands::Agent { socket, retry }) => {
             session_cli::run(&socket, retry.as_deref(), cli.plain)
         }
+        Some(Commands::AgentCreate {
+            port,
+            name,
+            no_attach,
+        }) => session_cli::create_remote(port, name.as_deref(), no_attach, cli.plain),
         Some(Commands::AgentAttach { port, session }) => {
             session_cli::attach_remote(port, sessions::SessionId::try_from(session)?)
         }

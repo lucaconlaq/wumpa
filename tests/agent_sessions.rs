@@ -1538,6 +1538,278 @@ fn pi_materialization_failure_still_launches_the_configured_agent() {
 }
 
 #[test]
+fn creation_helper_always_creates_and_does_not_fall_back_to_a_folder_picker() {
+    let fixture = Fixture::new();
+    let ready: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("ready")).unwrap()).unwrap();
+    let port = ready["port"].as_u64().unwrap().to_string();
+    for name in ["first", "second"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_wumpa"))
+            .args([
+                "agent-create",
+                "--port",
+                &port,
+                "--name",
+                name,
+                "--no-attach",
+            ])
+            .current_dir(&fixture.repo)
+            .env("TMUX", "/different-tmux,1,0")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Created agent"));
+    }
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 2);
+    let output = Command::new(env!("CARGO_BIN_EXE_wumpa"))
+        .args([
+            "agent-create",
+            "--port",
+            &port,
+            "--name",
+            "invalid folder",
+            "--no-attach",
+        ])
+        .current_dir(fixture.dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn plain_client_creates_an_agent_in_the_selected_linked_worktree() {
+    let fixture = Fixture::new();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let linked = fixture.dir.path().join("linked client tree");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args(["worktree", "add", "-b", "client-feature"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let ready: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("ready")).unwrap()).unwrap();
+    let config = fixture.dir.path().join("client.json");
+    fs::write(
+        &config,
+        json!({"servers":[{"name":"test", "type":"local", "port":ready["port"]}]}).to_string(),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wumpa"))
+        .arg("--plain")
+        .env("WUMPA_CLIENT_CONFIG", &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"1\nn\n2\nclient agent\nb\nq\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Created agent"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    wait(|| linked.join("launched-token").exists());
+    wait(|| {
+        fixture.activity()["sessions"]["sessions"]
+            .as_array()
+            .is_some_and(|sessions| sessions.len() == 1)
+    });
+    let remote = fixture.remote(json!({"action":"list"}));
+    let sessions = remote["sessions"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{remote}");
+    assert_eq!(sessions[0]["checkout"], json!(linked));
+    assert_eq!(sessions[0]["label"], "client agent");
+}
+
+#[test]
+fn managed_deletion_confirms_and_cascades_owned_agents_and_worktrees() {
+    let fixture = Fixture::new();
+    let created = fixture.create(&"e".repeat(32));
+    assert_eq!(created["status"], "created", "{created}");
+    let target = json!({"kind":"agent", "id":created["session_id"]});
+    let inspect = fixture.remote(json!({"action":"delete", "target":target}));
+    assert!(inspect["deletion"]["description"].is_string(), "{inspect}");
+    assert_eq!(fixture.list()["sessions"].as_array().unwrap().len(), 1);
+    let deleted = fixture.remote(json!({"action":"delete", "target":target, "confirmation":""}));
+    assert!(deleted["error"].is_null(), "{deleted}");
+    assert!(fixture.list()["sessions"].as_array().unwrap().is_empty());
+
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let linked = fixture.dir.path().join("linked");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args(["worktree", "add", "-b", "feature"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let target = json!({"kind":"worktree", "path":linked});
+    let clean = fixture.remote(json!({"action":"delete", "target":target}));
+    assert_eq!(clean["deletion"]["second"], "", "{clean}");
+    fs::write(linked.join("uncommitted"), "keep until confirmed").unwrap();
+    let inspect = fixture.remote(json!({"action":"delete", "target":target}));
+    assert_eq!(inspect["deletion"]["second"], "DELETE", "{inspect}");
+    let refused = fixture.remote(json!({"action":"delete", "target":target, "confirmation":""}));
+    assert!(refused["error"].is_string());
+    assert!(linked.join("uncommitted").exists());
+    let deleted =
+        fixture.remote(json!({"action":"delete", "target":target, "confirmation":"DELETE"}));
+    assert!(deleted["error"].is_null(), "{deleted}");
+    assert!(!linked.exists());
+
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(fixture.create(&"f".repeat(32))["status"], "created");
+    let git_path = |flag| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&linked)
+            .args(["rev-parse", "--path-format=absolute", flag])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    };
+    let observations = json!({"directory": observation(&linked), "root": observation(&linked),
+        "git_directory": observation(&git_path("--absolute-git-dir")),
+        "common_directory": observation(&git_path("--git-common-dir"))});
+    let linked_agent = fixture.operation(json!({"action":"create", "request_id":"a".repeat(32),
+    "observations":observations, "environment":[
+        {"name":STANDARD.encode("PATH"), "value":STANDARD.encode(std::env::var("PATH").unwrap())}
+    ]}));
+    assert_eq!(linked_agent["status"], "created", "{linked_agent}");
+    let target = json!({"kind":"repository", "url":"git@github.com:test/repo.git"});
+    let inspect = fixture.remote(json!({"action":"delete", "target":target}));
+    assert_eq!(inspect["deletion"]["second"], "checkout space", "{inspect}");
+    let refused =
+        fixture.remote(json!({"action":"delete", "target":target, "confirmation":"wrong"}));
+    assert!(refused["error"].is_string());
+    assert!(fixture.repo.exists());
+    assert!(linked.exists());
+    let deleted = fixture
+        .remote(json!({"action":"delete", "target":target, "confirmation":"checkout space"}));
+    assert!(deleted["error"].is_null(), "{deleted}");
+    assert!(!fixture.repo.exists());
+    assert!(!linked.exists());
+    assert!(deleted["repositories"].as_array().unwrap().is_empty());
+    let config: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("server.json")).unwrap()).unwrap();
+    assert!(config["repositories"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn repository_deletion_restores_main_checkout_if_metadata_cannot_be_saved() {
+    let fixture = Fixture::new();
+    fs::write(fixture.repo.join("keep"), "data").unwrap();
+    let config_path = fixture.dir.path().join("server.json");
+    fs::remove_file(&config_path).unwrap();
+    fs::create_dir(&config_path).unwrap();
+    let reply = fixture.remote(json!({"action":"delete", "target":{
+        "kind":"repository", "url":"git@github.com:test/repo.git"
+    }, "confirmation":"checkout space"}));
+    assert!(reply["error"].is_string(), "{reply}");
+    assert!(fixture.repo.join("keep").exists());
+    assert_eq!(
+        fixture.remote(json!({"action":"list"}))["repositories"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn deletion_rejects_unregistered_paths_and_stale_daemon_runs() {
+    let fixture = Fixture::new();
+    let foreign = fixture.dir.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("keep"), "data").unwrap();
+    let reply = fixture.remote(json!({"action":"delete", "target":{"kind":"worktree", "path":foreign}, "confirmation":"DELETE"}));
+    assert!(reply["error"].is_string());
+    assert!(foreign.join("keep").exists());
+    let reply = request(
+        &fixture.socket,
+        json!({"action":"delete", "run_id":"stale",
+        "target":{"kind":"repository", "url":"git@github.com:test/repo.git"}, "confirmation":"checkout space"}),
+    );
+    assert!(reply["error"].is_string());
+    assert!(fixture.repo.exists());
+}
+
+#[test]
 fn disabled_integration_does_not_inject_flags_or_accept_caller_integration_environment() {
     let mut fixture = Fixture::new();
     let agent = fixture.dir.path().join("fake-agent");

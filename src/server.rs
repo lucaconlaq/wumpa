@@ -212,6 +212,33 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                         &request,
                         Ok(Request::PrepareClone { .. } | Request::Clone { .. })
                     );
+                    let mut deletion = None;
+                    let request = request.and_then(|request| {
+                        if let Request::Delete {
+                            target,
+                            confirmation,
+                        } = request
+                        {
+                            let _reservation = cloning
+                                .try_lock()
+                                .map_err(|_| "a clone is running; retry later")?;
+                            #[cfg(unix)]
+                            {
+                                let handshake = crate::control::handshake(&control_socket)?;
+                                let reply =
+                                    crate::control::delete(&handshake, &target, confirmation)?;
+                                if let Some(error) = reply.error {
+                                    return Err(error.into());
+                                }
+                                deletion = reply.prompt;
+                            }
+                            #[cfg(not(unix))]
+                            return Err("deletion requires Unix".into());
+                            Ok(Request::List)
+                        } else {
+                            Ok(request)
+                        }
+                    });
                     let (destination, error) = match request
                         .and_then(|request| handle(request, &path, &config, &cloning, &stream))
                     {
@@ -235,6 +262,7 @@ pub fn serve(port: u16, socket: &Path, ready_file: Option<&Path>) -> Result<()> 
                         sessions: None,
                         sessions_updates: true,
                         worktrees: Vec::new(),
+                        deletion,
                         preflight: preflight.then_some(crate::protocol::Preflight {
                             version: crate::protocol::HELPER_VERSION,
                             destination,

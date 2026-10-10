@@ -253,17 +253,93 @@ fn clone_repository(
     }
 }
 
+fn create_agent(input: &Input, server: &Server, response: &Response) -> Result<()> {
+    let mut folders = Vec::new();
+    for repo in response.repository_entries() {
+        let Some(root) = repo.checkout_path else {
+            continue;
+        };
+        folders.push(root.clone());
+        if let Some(group) = response
+            .worktrees
+            .iter()
+            .find(|group| group.url == repo.url && group.error.is_none())
+        {
+            folders.extend(
+                group
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.path != root && !entry.bare && !entry.prunable)
+                    .map(|entry| entry.path.clone()),
+            );
+        }
+    }
+    if folders.is_empty() {
+        return Err("Clone a repository before creating an agent.".into());
+    }
+    println!("\nAgent checkout / worktree:");
+    for (index, folder) in folders.iter().enumerate() {
+        println!(
+            "  {}. {}",
+            index + 1,
+            crate::output::clean(&folder.display().to_string())
+        );
+    }
+    let Some(number) = input.prompt("Folder number (blank cancels): ")? else {
+        return Ok(());
+    };
+    if number.is_empty() {
+        return Ok(());
+    }
+    let folder = number
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|index| folders.get(index))
+        .ok_or("Choose a valid checkout or worktree number.")?;
+    let Some(name) = input.prompt("Agent session name (blank = default): ")? else {
+        return Ok(());
+    };
+    // The menu owns stdin through its reader thread. Never start a competing
+    // interactive reader or attach tmux here; create detached and return.
+    let status =
+        crate::agent_client::create(&server.connection, folder, Some(&name), false)?.status()?;
+    if !status.success() {
+        return Err(format!(
+            "Agent creation helper exited with {status}; check its output before retrying."
+        )
+        .into());
+    }
+    crate::output::hint(
+        "Agent is running on the server. Attach from the dashboard or with wumpa agent.",
+    );
+    Ok(())
+}
+
 fn connected(input: &Input, server: &Server) -> Result<()> {
     let mut response = request(&server.connection, &Request::List)?;
     println!("\nConnected to {:?}", server.name);
     show_repositories(&response);
     loop {
-        let Some(action) =
-            input.prompt("\n[a] Clone repository  [c] Clone saved  [l] List  [b] Back: ")?
+        let Some(action) = input.prompt(
+            "\n[n] New agent  [a] Clone repository  [c] Clone saved  [l] List  [b] Back: ",
+        )?
         else {
             return Ok(());
         };
         match action.as_str() {
+            "n" => {
+                if let Err(error) = create_agent(input, server, &response) {
+                    crate::output::error(error);
+                }
+                match request(&server.connection, &Request::List) {
+                    Ok(next) => {
+                        response = next;
+                        show_repositories(&response);
+                    }
+                    Err(error) => crate::output::error(error),
+                }
+            }
             "a" | "c" => {
                 let Some(root) = response.repository_dir.as_ref() else {
                     crate::output::error(
@@ -329,7 +405,7 @@ fn connected(input: &Input, server: &Server) -> Result<()> {
                 Err(error) => crate::output::error(error),
             },
             "b" | "q" => return Ok(()),
-            _ => println!("Choose a, c, l, or b."),
+            _ => println!("Choose n, a, c, l, or b."),
         }
     }
 }

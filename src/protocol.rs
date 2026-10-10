@@ -17,6 +17,11 @@ pub const MAX_MESSAGE: u64 = 1024 * 1024;
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Request {
     List,
+    /// Inspect or execute a server-managed deletion.
+    Delete {
+        target: crate::deletion::Target,
+        confirmation: Option<String>,
+    },
     /// Read the activity cache only; no Git discovery or agent control.
     SessionStatus {
         version: u32,
@@ -96,6 +101,8 @@ pub struct Response {
     pub sessions_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight: Option<Preflight>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion: Option<crate::deletion::Prompt>,
 }
 
 impl Response {

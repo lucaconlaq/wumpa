@@ -744,10 +744,31 @@ impl Manager {
         }
     }
 
-    /// Future managed deletion paths must hold the manager mutex through this
-    /// callback. Stop failures abort removal; the callback must itself use
-    /// replacement-safe filesystem deletion. No checkout deletion CLI is added.
-    #[allow(dead_code)]
+    /// Stop a verified owned agent before removing its backend session.
+    pub fn delete_agent(&mut self, id: &SessionId, deadline: Instant) -> Result<()> {
+        self.verify_runtime()?;
+        let snapshot = self.snapshot(deadline);
+        if snapshot.error.is_some() || !snapshot.supported {
+            return Err("cannot verify agents; deletion aborted".into());
+        }
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == *id)
+            .ok_or("agent is no longer available")?;
+        let status = self.runner(id, true, deadline)?;
+        if !status.stopped
+            || status.instance != self.instance
+            || status.checkout != session.checkout
+        {
+            return Err("agent termination could not be verified".into());
+        }
+        self.command(&["kill-session", "-t", &backend_name(id)], deadline)?;
+        Ok(())
+    }
+
+    /// Hold the manager mutex through removal. Stop failures abort deletion;
+    /// the callback must itself use replacement-safe filesystem deletion.
     pub fn with_checkout_removal(
         &mut self,
         checkout: &checkout::Checkout,

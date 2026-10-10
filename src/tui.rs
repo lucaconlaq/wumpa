@@ -138,6 +138,10 @@ struct App {
     pane: Pane,
     form: Option<Form>,
     remove_target: Option<usize>,
+    delete_target: Option<crate::deletion::Target>,
+    delete_prompt: Option<crate::deletion::Prompt>,
+    delete_second: bool,
+    delete_input: String,
     details: bool,
     details_scroll: u16,
     zed_launch: Option<zed::Launch>,
@@ -172,6 +176,10 @@ impl App {
             pane: Pane::Servers,
             form: None,
             remove_target: None,
+            delete_target: None,
+            delete_prompt: None,
+            delete_second: false,
+            delete_input: String::new(),
             details: false,
             details_scroll: 0,
             zed_launch: None,
@@ -287,6 +295,12 @@ impl App {
         self.job = None;
         match result {
             Ok(response) => {
+                self.delete_prompt = response.deletion.clone();
+                self.delete_second = false;
+                self.delete_input.clear();
+                if self.delete_prompt.is_none() {
+                    self.delete_target = None;
+                }
                 self.connected = Some(target);
                 self.workspace = Some(target);
                 self.details = false;
@@ -406,6 +420,7 @@ impl App {
             || self.pane != Pane::Repositories
             || self.form.is_some()
             || self.remove_target.is_some()
+            || self.delete_prompt.is_some()
             || self.ssh_command.is_some()
             || self.zed_launch.is_some()
             || Instant::now() < self.next_sessions_refresh
@@ -631,6 +646,19 @@ impl App {
         rows
     }
 
+    fn finish_delete(&mut self, confirmation: String) {
+        self.delete_prompt = None;
+        if let (Some(server), Some(target)) = (self.connected, self.delete_target.take()) {
+            self.start(
+                server,
+                Request::Delete {
+                    target,
+                    confirmation: Some(confirmation),
+                },
+            );
+        }
+    }
+
     fn selected_agent(&self) -> Option<&crate::session_runtime::Summary> {
         self.dashboard_rows()
             .get(self.repos.selected()?)
@@ -675,6 +703,23 @@ impl App {
     fn zed_target(&self) -> Result<String> {
         let (connection, checkout) = self.checkout_target()?;
         zed::target(connection, checkout)
+    }
+
+    fn create_agent(&mut self) {
+        self.sessions_job = None;
+        let result = self.checkout_target().and_then(|(connection, checkout)| {
+            crate::agent_client::create(connection, checkout, None, true)
+        });
+        match result {
+            Ok(command) => {
+                self.details = false;
+                self.ssh_command = Some(command);
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                self.error = true;
+            }
+        }
     }
 
     fn attach_agent(&mut self) {
@@ -743,6 +788,36 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
         }
+        if let Some(prompt) = self.delete_prompt.clone() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.delete_prompt = None;
+                    self.delete_target = None;
+                }
+                KeyCode::Char('n') if !self.delete_second => {
+                    self.delete_prompt = None;
+                    self.delete_target = None;
+                }
+                KeyCode::Char('y') if !self.delete_second => {
+                    if prompt.second.is_empty() {
+                        self.finish_delete(String::new());
+                    } else {
+                        self.delete_second = true;
+                    }
+                }
+                KeyCode::Char(c) if self.delete_second && !c.is_control() => {
+                    self.delete_input.push(c)
+                }
+                KeyCode::Backspace if self.delete_second => {
+                    self.delete_input.pop();
+                }
+                KeyCode::Enter if self.delete_second && self.delete_input == prompt.second => {
+                    self.finish_delete(prompt.second)
+                }
+                _ => {}
+            }
+            return false;
+        }
         if self.details {
             match key.code {
                 KeyCode::Char('i') | KeyCode::Esc => self.details = false,
@@ -759,6 +834,7 @@ impl App {
                 KeyCode::Enter if self.job.is_none() && self.selected_agent().is_some() => {
                     self.attach_agent();
                 }
+                KeyCode::Char('n') if self.job.is_none() => self.create_agent(),
                 KeyCode::Char('t') if self.job.is_none() => self.open_ssh(),
                 KeyCode::Char('s') => self.switch_servers(),
                 KeyCode::Char('q') => return true,
@@ -843,6 +919,37 @@ impl App {
             KeyCode::Char('z') if self.pane == Pane::Repositories && self.job.is_none() => {
                 self.open_zed()
             }
+            KeyCode::Char('d') | KeyCode::Delete
+                if self.pane == Pane::Repositories && self.job.is_none() =>
+            {
+                if let Some(server) = self.connected {
+                    let target = if let Some(agent) = self.selected_agent() {
+                        Some(crate::deletion::Target::Agent {
+                            id: agent.id.clone(),
+                        })
+                    } else {
+                        self.selected_checkout()
+                            .map(|(repo, worktree)| match worktree {
+                                Some(worktree) => crate::deletion::Target::Worktree {
+                                    path: worktree.path.clone(),
+                                },
+                                None => crate::deletion::Target::Repository {
+                                    url: repo.url.clone(),
+                                },
+                            })
+                    };
+                    if let Some(target) = target {
+                        self.delete_target = Some(target.clone());
+                        self.start(
+                            server,
+                            Request::Delete {
+                                target,
+                                confirmation: None,
+                            },
+                        );
+                    }
+                }
+            }
             KeyCode::Char('d') | KeyCode::Delete if self.pane == Pane::Servers => {
                 if self.job.is_none() {
                     self.remove_target = self.servers.selected();
@@ -850,6 +957,9 @@ impl App {
                     self.status =
                         "Wait for the current request before removing a connection.".into();
                 }
+            }
+            KeyCode::Char('n') if self.pane == Pane::Repositories && self.job.is_none() => {
+                self.create_agent()
             }
             KeyCode::Char('n') if self.pane == Pane::Servers && self.job.is_none() => {
                 self.form = Some(Form::new(FormKind::Server))
@@ -979,7 +1089,9 @@ pub fn run() -> Result<()> {
                 // Keep inherited SSH/helper diagnostics visible on the normal
                 // screen before returning to the dashboard's alternate screen.
                 eprintln!("\n{}", crate::output::clean(&app.status));
-                eprintln!("If agent-attach is unrecognized, update wumpa on the remote SSH PATH.");
+                eprintln!(
+                    "If agent-attach or agent-create is unrecognized, update wumpa on the remote SSH PATH."
+                );
                 eprintln!("Press Enter to return to Wumpa.");
                 let mut line = String::new();
                 io::stdin().read_line(&mut line)?;
@@ -1009,6 +1121,31 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn repository_deletion_requires_two_distinct_confirmations() {
+        let mut app = App::new(ClientConfig::default(), PathBuf::from("/unused"));
+        app.delete_target = Some(crate::deletion::Target::Repository { url: "repo".into() });
+        app.delete_prompt = Some(crate::deletion::Prompt {
+            description: "Delete repository?".into(),
+            second: "repo".into(),
+        });
+        app.key(key(KeyCode::Enter));
+        assert!(!app.delete_second);
+        app.key(key(KeyCode::Char('y')));
+        assert!(app.delete_second);
+        app.key(key(KeyCode::Enter));
+        assert!(app.delete_prompt.is_some());
+        for c in "wrong".chars() {
+            app.key(key(KeyCode::Char(c)));
+        }
+        app.key(key(KeyCode::Enter));
+        assert!(app.delete_prompt.is_some());
+        app.key(key(KeyCode::Esc));
+        assert!(app.delete_prompt.is_none());
+        assert!(app.delete_target.is_none());
+        assert!(app.job.is_none());
     }
 
     fn complete_job(app: &mut App, target: usize, result: std::result::Result<Response, String>) {
@@ -1241,6 +1378,55 @@ mod tests {
             }
             responder.join().unwrap();
         }
+    }
+
+    #[test]
+    fn new_agent_targets_the_selected_checkout_or_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = removal_app(dir.path().join("client.json"));
+        app.config.servers[1].connection = Connection::Ssh {
+            host: "dev-host".into(),
+            port: 8123,
+        };
+        app.pane = Pane::Repositories;
+        app.repositories = vec![Repository {
+            url: "ssh://host/repo.git".into(),
+            checkout_path: Some(PathBuf::from("/repo")),
+        }];
+        app.worktrees = vec![crate::worktrees::RepositoryWorktrees {
+            url: "ssh://host/repo.git".into(),
+            entries: vec![crate::worktrees::Worktree {
+                path: PathBuf::from("/linked tree"),
+                ..Default::default()
+            }],
+            error: None,
+        }];
+        app.repos.select(Some(0));
+        app.key(key(KeyCode::Char('n')));
+        let command = app.ssh_command.take().unwrap();
+        assert_eq!(
+            command.get_args().last().unwrap(),
+            "cd '/repo' && exec wumpa agent-create --port 8123"
+        );
+        app.repos.select(Some(1));
+        app.key(key(KeyCode::Char('n')));
+        let command = app.ssh_command.take().unwrap();
+        assert_eq!(
+            command.get_args().last().unwrap(),
+            "cd '/linked tree' && exec wumpa agent-create --port 8123"
+        );
+        app.config.servers[1].connection = Connection::Local { port: 8123 };
+        app.key(key(KeyCode::Char('n')));
+        let command = app.ssh_command.take().unwrap();
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/linked tree"))
+        );
+        app.repos.select(Some(0));
+        app.repositories[0].checkout_path = None;
+        app.key(key(KeyCode::Char('n')));
+        assert!(app.ssh_command.is_none());
+        assert!(app.error);
     }
 
     #[test]

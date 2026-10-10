@@ -289,9 +289,20 @@ impl App {
             rows[2],
         );
         let actions = if in_workspace && self.selected_agent().is_some() {
-            vec![("Enter", "Attach"), ("i", "Details"), ("z", "Zed")]
+            vec![
+                ("Enter", "Attach"),
+                ("n", "New agent"),
+                ("i", "Details"),
+                ("z", "Zed"),
+            ]
         } else if in_workspace {
-            vec![("a", "Clone"), ("i", "Details"), ("z", "Zed"), ("t", "SSH")]
+            vec![
+                ("n", "New agent"),
+                ("a", "Clone"),
+                ("i", "Details"),
+                ("z", "Zed"),
+                ("t", "SSH"),
+            ]
         } else {
             vec![("Enter", "Open"), ("n", "New server"), ("d", "Remove")]
         };
@@ -311,7 +322,7 @@ impl App {
                 Line::from(shortcuts),
                 Line::styled(
                     if in_workspace {
-                        " c Clone saved   r Refresh   s Switch server   q Quit"
+                        " c Clone saved   d Delete   r Refresh   s Switch server   q Quit"
                     } else if self.workspace.is_some() {
                         " ↑↓ Navigate   Esc Back to workspace   q Quit"
                     } else {
@@ -327,6 +338,36 @@ impl App {
         }
         if let Some(form) = &self.form {
             draw_form(frame, form, self.repository_dir.as_deref());
+        }
+        if let Some(prompt) = &self.delete_prompt {
+            let width = 72.min(area.width.saturating_sub(2));
+            let height = 12.min(area.height);
+            let popup = Rect::new(
+                (area.width - width) / 2,
+                (area.height - height) / 2,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            let text = if self.delete_second {
+                format!(
+                    "\n{}\n\nType {} to confirm permanently deleting files:\n\n{}▏\n\nEnter confirm · Esc cancel",
+                    clean(&prompt.description),
+                    clean(&prompt.second),
+                    clean(&self.delete_input)
+                )
+            } else {
+                format!(
+                    "\n{}\n\n[y] Delete permanently    [n / Esc] Cancel",
+                    clean(&prompt.description)
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: true })
+                    .block(panel(" Delete from server ", true)),
+                popup,
+            );
         }
         if let Some(index) = self.remove_target {
             let width = 64.min(area.width.saturating_sub(4));
