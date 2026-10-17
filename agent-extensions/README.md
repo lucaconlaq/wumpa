@@ -121,13 +121,41 @@ Materialization failures (including overlong socket paths) fall back to the
 unmodified configured agent command, without Pi flags or reserved environment.
 Each source copy belongs to one runner; upgrades never overwrite live copies.
 
+## Pi footer
+
+The bundled extension publishes the `wumpa-session` extension status in interactive
+Pi sessions. With `@smoose/pi-footer`, add `custom:wumpa` to `footer.segments` and
+this entry to `footer.customItems` in Pi settings:
+
+```json
+{
+  "id": "wumpa",
+  "statusKey": "wumpa-session",
+  "color": "#00afaf"
+}
+```
+
+The repository's `.pi/settings.json` already includes this configuration. The
+segment shows ` wumpa: <id>` in teal, using the first five characters of the
+Wumpa ID without the conversation name. The status includes its own icon and
+label; leave the custom item's `prefix` unset to avoid the plugin's dot separator. The icon requires a Nerd Font, like the
+existing footer configuration. The status persists across conversation renames
+and replacements and clears on shutdown. The short ID is display-only, not
+guaranteed unique; it is never an attachment target.
+
+The status is absent without a valid `WUMPA_SESSION_ID` or inside delegated
+children marked `PSST_SUBAGENT=1`. Environment-based detection is a display hint,
+not authentication. The display does not require the activity socket to be available. It does not
+install or replace a footer. Disabled integration and existing live source copies
+are unchanged; rebuild/restart Wumpa and launch a new agent to obtain this update.
+
 ## Development validation
 
 Run the isolated socket/lifecycle suite on Linux with Node **22.18+** (native
 TypeScript stripping; Node 24.21.0 was used here):
 
 ```sh
-node --test tests/pi_activity.test.mjs
+node --test tests/pi_activity.test.mjs tests/pi_footer.test.mjs
 ```
 
 An optional real interactive smoke test uses util-linux `script` to provide a PTY.

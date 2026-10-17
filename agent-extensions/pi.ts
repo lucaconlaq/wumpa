@@ -26,7 +26,19 @@ interface Client {
 // support from an executable basename or start resources in the factory.
 export default function (pi: ExtensionAPI) {
     let current: ActivityServer | undefined;
+    let footerUI: ExtensionContext["ui"] | undefined;
+    const updateFooter = (ctx: ExtensionContext) => {
+        if (ctx.mode !== "tui") return;
+        footerUI = ctx.ui;
+        const id = process.env.WUMPA_SESSION_ID;
+        if (!id || !/^[a-f0-9]{32}$/.test(id) || process.env.PSST_SUBAGENT === "1") {
+            ctx.ui.setStatus("wumpa-session", undefined);
+            return;
+        }
+        ctx.ui.setStatus("wumpa-session", ` wumpa: ${id.slice(0, 5)}`);
+    };
     pi.on("session_start", (_event, ctx) => {
+        updateFooter(ctx);
         current?.stop();
         current = undefined;
         try {
@@ -41,12 +53,17 @@ export default function (pi: ExtensionAPI) {
         }
     });
     pi.on("session_shutdown", () => {
+        footerUI?.setStatus("wumpa-session", undefined);
+        footerUI = undefined;
         current?.stop();
         current = undefined;
     });
     pi.on("agent_start", (_event, ctx) => current?.refresh(ctx, "working"));
     pi.on("agent_settled", (_event, ctx) => current?.refresh(ctx));
-    pi.on("session_info_changed", (_event, ctx) => current?.refresh(ctx));
+    pi.on("session_info_changed", (_event, ctx) => {
+        updateFooter(ctx);
+        current?.refresh(ctx);
+    });
     pi.on("session_before_compact", (_event, ctx) => current?.refresh(ctx));
     pi.on("session_compact", (_event, ctx) => current?.refreshAfterBoundary(ctx));
     pi.on("session_compact_failed", (_event, ctx) => current?.refreshAfterBoundary(ctx));
