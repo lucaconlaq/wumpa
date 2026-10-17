@@ -15,11 +15,15 @@ server from your terminal. Open checkouts in Zed without juggling SSH sessions.
 
 ## Quick start
 
-1. Install on your computer and Linux server (requires Rust 1.85+):
+1. With [mise](https://mise.jdx.dev/getting-started.html) installed and activated,
+   install Wumpa on your computer and Linux server:
    ```sh
-   cargo install --path .
+   mise use -g github:lucaconlaq/wumpa@latest
    ```
-2. Start Wumpa on the server:
+   Prebuilt binaries are available for macOS and Linux on x86_64 and ARM64;
+   no Rust toolchain is required.
+2. Need a server? See [TNT](tnt/README.md) to provision a Wumpa server on
+   Google Cloud with NixOS. If you already have a Linux server, start Wumpa there:
    ```sh
    mkdir -p "$HOME/.wumpa/run"
    chmod 700 "$HOME/.wumpa/run"
@@ -29,5 +33,3 @@ server from your terminal. Open checkouts in Zed without juggling SSH sessions.
    `user@host` (default port: `7432`), then Enter to connect. Use the on-screen
    shortcuts to manage repositories, worktrees, and agents; press `z` to open a
    checkout in Zed. Press Enter on a checkout to open SSH, or on an agent to attach.
-   Blue agent rows show an animated indicator while working; dirty checkouts show
-   pale green additions and pale red removals as `+x -y`.
