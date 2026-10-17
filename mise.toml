@@ -2,6 +2,7 @@
 psst = "0.7.3"
 pi = "latest"
 rust = "latest"
+node = "latest"
 
 [tool_alias]
 psst = "npm:@lucaconlaq/psst"
